@@ -1,0 +1,22 @@
+[project]
+name = "fin3"
+version = "0.1.0"
+description = "Declarative financial time-series data library for VectorBT Pro backtesting"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "arcticdb>=5.0",
+    "pandas>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "structlog>=24.0",
+]
+
+[project.optional-dependencies]
+databento = ["databento"]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+]
