@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 from readability import Document
 
 # Configuration
-BASE_URL = 'https://docs.arcticdb.io/latest/'
+BASE_URL = "https://docs.arcticdb.io/latest/"
 BASE_URL = "https://docs.arcticdb.io/latest/"
 OUTPUT_FOLDER = "docs/arcticdb"
 
@@ -230,7 +230,7 @@ def main() -> int:
     print("\nStarting scrape...")
     scrape_site(BASE_URL, BASE_URL, args.output)
 
-    print(f"\nScraping complete!")
+    print("\nScraping complete!")
     print(f"Total URLs visited: {len(visited_urls)}")
     print(f"Files saved to: {args.output}")
 

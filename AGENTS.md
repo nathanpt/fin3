@@ -49,6 +49,16 @@ This project uses **uv** for dependency and venv management. Always use `uv run`
 - **Configuration**: Pydantic Settings with `.env` file support
 - **Logging**: structlog for structured JSON logging
 
+## Repository Coding Standards
+
+When working in this repository, you must strictly adhere to the following rules:
+
+- **Type Safety:** All Python code must be strictly typed. `mypy` must pass without errors.
+- **Linting & Formatting:** We use `ruff` exclusively. Do not use `flake8`, `black`, or `isort`.
+- **Testing:** All tests live in the `/tests` directory, completely separate from the `/src` directory. Use `pytest`.
+- **Error Handling:** Raise explicit exceptions (e.g., `ValueError`, custom domain exceptions). **Never** use `assert` statements in the `src/` code.
+- **Dependencies:** Do not modify `pyproject.toml` to add dependencies without explicit user authorization.
+
 ## Testing Guidelines
 
 - Framework: pytest

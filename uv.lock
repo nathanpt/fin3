@@ -484,11 +484,29 @@ wheels = [
 ]
 
 [[package]]
+name = "exchange-calendars"
+version = "4.13.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "korean-lunar-calendar" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pyluach" },
+    { name = "toolz" },
+    { name = "tzdata" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/47/73/460b0ece4e7444e3098b7738974c822787e134578d069d3a88b4be17d50a/exchange_calendars-4.13.2.tar.gz", hash = "sha256:a9459425dd64142cd54fbc639847403c7e0c33d60fbc326c94fc1d6bd127f002", size = 4137321, upload-time = "2026-03-10T03:24:38.536Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/4c/0469b40057bc9f8d9594dcc6024202626b981ae4b52dfcd304552e8e1c3a/exchange_calendars-4.13.2-py3-none-any.whl", hash = "sha256:fc5a2ad0d61b5c3a6539a3061cd4cbb55c59f4a903455cec7926e4b798919996", size = 213306, upload-time = "2026-03-10T03:24:37.055Z" },
+]
+
+[[package]]
 name = "fin3"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "arcticdb" },
+    { name = "exchange-calendars" },
     { name = "pandas" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
@@ -506,10 +524,17 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pandas-stubs" },
+    { name = "types-pytz" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "arcticdb", specifier = ">=5.0" },
     { name = "databento", marker = "extra == 'databento'" },
+    { name = "exchange-calendars", specifier = ">=4.13.2" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
@@ -520,6 +545,12 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.0" },
 ]
 provides-extras = ["databento", "dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pandas-stubs", specifier = ">=3.0.0.260204" },
+    { name = "types-pytz", specifier = ">=2026.2.0.20260518" },
+]
 
 [[package]]
 name = "frozenlist"
@@ -642,6 +673,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
+]
+
+[[package]]
+name = "korean-lunar-calendar"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5a/93/a0bd2bd53ab19330e83ecc5652b7774ae86fd2fee19bc05ad220cf9db08b/korean_lunar_calendar-0.3.1.tar.gz", hash = "sha256:eb2c485124a061016926bdea6d89efdf9b9fdbf16db55895b6cf1e5bec17b857", size = 9877, upload-time = "2022-09-16T10:53:25.713Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9c/96/30f3fe51b336bb6da4714f4fdad7bbdce8f13af79af2eb75e22908f3f9f4/korean_lunar_calendar-0.3.1-py3-none-any.whl", hash = "sha256:392757135c492c4f42a604e6038042953c35c6f449dda5f27e3f86a7f9c943e5", size = 9033, upload-time = "2022-09-16T10:53:23.771Z" },
 ]
 
 [[package]]
@@ -1090,6 +1130,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pandas-stubs"
+version = "3.0.0.260204"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/1d/297ff2c7ea50a768a2247621d6451abb2a07c0e9be7ca6d36ebe371658e5/pandas_stubs-3.0.0.260204.tar.gz", hash = "sha256:bf9294b76352effcffa9cb85edf0bed1339a7ec0c30b8e1ac3d66b4228f1fbc3", size = 109383, upload-time = "2026-02-04T15:17:17.247Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/2f/f91e4eee21585ff548e83358332d5632ee49f6b2dcd96cb5dca4e0468951/pandas_stubs-3.0.0.260204-py3-none-any.whl", hash = "sha256:5ab9e4d55a6e2752e9720828564af40d48c4f709e6a2c69b743014a6fcb6c241", size = 168540, upload-time = "2026-02-04T15:17:15.615Z" },
+]
+
+[[package]]
 name = "pathspec"
 version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1445,6 +1497,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyluach"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/11/11/42568c1568a75f8803c59f26d29af01a0890352b7a8e03d41ecda8bfb5dd/pyluach-2.3.0.tar.gz", hash = "sha256:ec6e30669d1df50c9ca160486da44a8195bb4c7a5d3d533990d0c5b03accd281", size = 26910, upload-time = "2025-09-09T20:24:39.651Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/c8/f96208ade3ca4c23b372497d0788bcf0f2e0ff4310e5ee693366bc33fdf0/pyluach-2.3.0-py3-none-any.whl", hash = "sha256:4497b731aef59508b079dbf5f00bc5bf4329ac45090a6cd37b5a83756f0e69ab", size = 25914, upload-time = "2025-09-09T20:24:37.831Z" },
+]
+
+[[package]]
 name = "pytest"
 version = "9.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1669,6 +1730,24 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/12/64/da524626d3b9cc40c168a13da8335fe1c51be12c0a63685cc6db7308daae/tomli-2.4.1-cp314-cp314t-win_amd64.whl", hash = "sha256:2c1c351919aca02858f740c6d33adea0c5deea37f9ecca1cc1ef9e884a619d26", size = 121196, upload-time = "2026-03-25T20:22:01.169Z" },
     { url = "https://files.pythonhosted.org/packages/5a/cd/e80b62269fc78fc36c9af5a6b89c835baa8af28ff5ad28c7028d60860320/tomli-2.4.1-cp314-cp314t-win_arm64.whl", hash = "sha256:eab21f45c7f66c13f2a9e0e1535309cee140182a9cdae1e041d02e47291e8396", size = 100393, upload-time = "2026-03-25T20:22:02.137Z" },
     { url = "https://files.pythonhosted.org/packages/7b/61/cceae43728b7de99d9b847560c262873a1f6c98202171fd5ed62640b494b/tomli-2.4.1-py3-none-any.whl", hash = "sha256:0d85819802132122da43cb86656f8d1f8c6587d54ae7dcaf30e90533028b49fe", size = 14583, upload-time = "2026-03-25T20:22:03.012Z" },
+]
+
+[[package]]
+name = "toolz"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/11/d6/114b492226588d6ff54579d95847662fc69196bdeec318eb45393b24c192/toolz-1.1.0.tar.gz", hash = "sha256:27a5c770d068c110d9ed9323f24f1543e83b2f300a687b7891c1a6d56b697b5b", size = 52613, upload-time = "2025-10-17T04:03:21.661Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/12/5911ae3eeec47800503a238d971e51722ccea5feb8569b735184d5fcdbc0/toolz-1.1.0-py3-none-any.whl", hash = "sha256:15ccc861ac51c53696de0a5d6d4607f99c210739caf987b5d2054f3efed429d8", size = 58093, upload-time = "2025-10-17T04:03:20.435Z" },
+]
+
+[[package]]
+name = "types-pytz"
+version = "2026.2.0.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/d9/9fa4019d2235bd374293e1fd4153879b28b6ae1d2bae98addd352c9713f2/types_pytz-2026.2.0.20260518.tar.gz", hash = "sha256:e5d254329e9c4e91f0781b22c43a4bb2d10bb044d97b24c4b05d45567b0eae16", size = 10871, upload-time = "2026-05-18T06:02:45.789Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/89/41e80670779a223d8bc8bc83019a619988cfa5c432cedac5cec23884fbc4/types_pytz-2026.2.0.20260518-py3-none-any.whl", hash = "sha256:3a12eaa38f476bd650902a9c9bb442f03f3c7dee2be5c5848bce61bd708d205a", size = 10125, upload-time = "2026-05-18T06:02:44.968Z" },
 ]
 
 [[package]]

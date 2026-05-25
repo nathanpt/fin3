@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "arcticdb>=5.0",
+    "exchange-calendars>=4.13.2",
     "pandas>=2.0",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
@@ -20,3 +21,13 @@ dev = [
     "ruff",
     "mypy",
 ]
+
+[dependency-groups]
+dev = [
+    "pandas-stubs>=3.0.0.260204",
+    "types-pytz>=2026.2.0.20260518",
+]
+
+[tool.mypy]
+ignore_missing_imports = true
+strict = true
