@@ -8,19 +8,45 @@
 
 ```
 fin3/
-├── __init__.py              # Public API
+├── __init__.py              # Public API exports
 ├── core.py                  # MarketDataFetcher orchestrator
-├── config/settings.py       # Pydantic settings
-├── providers/               # Data provider plugins (base, databento, polygon, binance)
-├── storage/                 # ArcticDB + MinIO adapter
-├── utils/                   # Date/gap helpers, validation, logging
-├── schemas.py               # Data schemas + shared models
-├── vb_integration.py        # VectorBT Pro helpers
-├── cli.py                   # Optional CLI
-└── exceptions.py
+├── exceptions.py            # Fin3Error hierarchy (9 classes)
+├── schemas.py               # AssetType, Resolution enums, OHLCV_COLUMNS, empty_ohlcv(), library_name()
+├── calendar/
+│   └── exchange.py          # CalendarStrategy protocol, ExchangeCalendarStrategy, ContinuousCalendarStrategy
+├── config/
+│   └── settings.py          # MinioConfig, DatabentoConfig, PolygonConfig, BinanceConfig, ClientConfig
+├── metadata/
+│   └── asset_profile.py     # MetadataStore (IPO/delist date bootstrap with 3-tier fallback)
+├── providers/
+│   ├── __init__.py          # ProviderRegistry (decorator-based registration)
+│   ├── base.py              # Abstract DataProvider base class
+│   └── databento.py         # DatabentoProvider with retry/backoff
+├── storage/
+│   └── arctic.py            # ArcticStorage (MinIO/LMDB adapter with library caching)
+└── utils/
+    ├── date_utils.py         # ensure_utc(), detect_gaps(), _chunk_boundaries()
+    ├── logging.py            # structlog configure_logging()
+    └── validation.py         # validate_raw_provider_data() (Stage 1), validate_storage_artifact() (Stage 2)
+tests/
+├── conftest.py               # LMDB fixtures, make_ohlcv() helper
+├── test_calendar.py          # Calendar strategy tests (5)
+├── test_config.py            # Pydantic settings tests (5)
+├── test_core.py              # MarketDataFetcher E2E tests (4)
+├── test_exceptions.py        # Exception hierarchy tests (7)
+├── test_gap_detection.py     # Gap detection tests (4)
+├── test_metadata.py          # MetadataStore tests (3)
+├── test_storage.py           # ArcticStorage tests (7)
+├── test_validation.py        # Validation pipeline tests (12)
+└── providers/
+    └── test_databento.py     # DatabentoProvider tests (3)
 docs/
 ├── DESIGN.md                # Full system design document
+├── USAGE.md                 # Internal usage guide (install, config, API examples)
+├── ROADMAP.md               # Project roadmap
 └── arcticdb_docs/           # Scraped ArcticDB documentation (see scripts/scrape_arcticdb.py)
+scripts/
+└── scrape_arcticdb.py       # ArcticDB docs scraper
 ```
 
 ## Build, Test & Development Commands

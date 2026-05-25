@@ -1,23 +1,32 @@
 """Tests for configuration loading."""
 
-from typing import Any
-
 import pytest
 from pydantic import ValidationError
 
 from fin3.config.settings import ClientConfig, DatabentoConfig, MinioConfig
 
 
+@pytest.fixture(autouse=True)
+def _no_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent unit tests from reading the project .env file.
+
+    pydantic-settings reads the .env file at instantiation time. We patch
+    the SettingsConfigDict so ClientConfig doesn't load .env during tests.
+    """
+    original = ClientConfig.model_config.copy()
+    monkeypatch.setattr(ClientConfig, "model_config", {**original, "env_file": None})
+
+
 class TestClientConfig:
     def test_minio_required_fields(self) -> None:
         with pytest.raises(ValidationError):
-            ClientConfig()
+            ClientConfig()  # type: ignore[call-arg]
 
-    def test_minio_from_env(self, monkeypatch: Any) -> None:
+    def test_minio_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("FIN3_MINIO__ENDPOINT", "localhost:9000")
         monkeypatch.setenv("FIN3_MINIO__ACCESS_KEY", "minioadmin")
         monkeypatch.setenv("FIN3_MINIO__SECRET_KEY", "minioadmin")
-        config = ClientConfig()
+        config = ClientConfig()  # type: ignore[call-arg]
         assert config.minio.endpoint == "localhost:9000"
         assert config.minio.access_key == "minioadmin"
         assert config.minio.secure is False

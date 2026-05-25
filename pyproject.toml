@@ -28,6 +28,11 @@ dev = [
     "types-pytz>=2026.2.0.20260518",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests that require real infrastructure (Databento API key, MinIO)",
+]
+
 [tool.mypy]
 ignore_missing_imports = true
 strict = true

@@ -109,12 +109,15 @@ class DatabentoProvider(DataProvider):
     def get_instrument_bounds(self, symbol: str) -> dict[str, datetime | None]:
         """Query Databento instrument definitions for lifecycle bounds."""
         try:
+            # Use a narrow date range to minimise billing cost.
+            # Databento definitions are published per session; a few recent
+            # trading days are sufficient to get the instrument mapping.
             store = self._client.timeseries.get_range(
                 dataset=self._dataset,
                 symbols=symbol,
                 schema="definition",
-                start="1970-01-01",
-                end="2099-12-31",
+                start="2024-01-01",
+                end="2024-12-31",
                 stype_in="raw_symbol",
                 stype_out="instrument_id",
                 limit=1,
