@@ -15,25 +15,66 @@ from fin3.schemas import OHLCV_COLUMNS, Resolution
 logger = structlog.get_logger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Pure detection helpers — return structured results, never raise.
+# Consumed by both the throwing wrappers below and integrity.py.
+# ---------------------------------------------------------------------------
+
+
+def _has_duplicates(df: pd.DataFrame) -> bool:
+    return bool(df.index.duplicated().any())
+
+
+def _is_monotonic(df: pd.DataFrame) -> bool:
+    return bool(df.index.is_monotonic_increasing)
+
+
+def _find_bad_spacings(df: pd.DataFrame, resolution: Resolution) -> pd.Series:
+    """Return a Series of timestamp diffs that don't match *resolution*.
+
+    Empty Series means all spacings are correct (or df has < 2 rows).
+    """
+    if len(df) < 2:
+        return pd.Series(dtype="timedelta64[ns]")
+    diffs = pd.Series(df.index).diff().dropna()
+    expected = pd.tseries.frequencies.to_offset(resolution.timedelta_alias)
+    return diffs[diffs != expected]
+
+
+def _find_ohlcv_violations(df: pd.DataFrame) -> pd.Series:
+    """Return a boolean Series (True = OHLCV constraint violation).
+
+    Only rows where all four OHLC columns are non-NaN are considered.
+    """
+    o, h, low_, c = df["open"], df["high"], df["low"], df["close"]
+    all_present = o.notna() & h.notna() & low_.notna() & c.notna()
+    if not all_present.any():
+        return pd.Series(dtype=bool)
+    ok = (low_ <= o) & (o <= h) & (low_ <= c) & (c <= h)
+    return all_present & ~ok
+
+
+# ---------------------------------------------------------------------------
+# Throwing wrappers — used by the two-stage write-path validation pipeline.
+# ---------------------------------------------------------------------------
+
+
 def _check_duplicates(df: pd.DataFrame, label: str) -> None:
-    if df.index.duplicated().any():
+    if _has_duplicates(df):
         raise SchemaValidationError(f"[{label}] Duplicate timestamps found")
 
 
 def _check_monotonic(df: pd.DataFrame, label: str) -> None:
-    if not df.index.is_monotonic_increasing:
+    if not _is_monotonic(df):
         raise SchemaValidationError(
             f"[{label}] Timestamps are not monotonically increasing"
         )
 
 
 def _check_resolution(df: pd.DataFrame, resolution: Resolution, label: str) -> None:
-    if len(df) < 2:
-        return
-    diffs = pd.Series(df.index).diff().dropna()
-    expected = pd.tseries.frequencies.to_offset(resolution.timedelta_alias)
-    if not (diffs == expected).all():
-        bad = diffs[diffs != expected]
+    bad = _find_bad_spacings(df, resolution)
+    if len(bad) > 0:
+        expected = pd.tseries.frequencies.to_offset(resolution.timedelta_alias)
         raise SchemaValidationError(
             f"[{label}] Timestamp spacing {bad.iloc[0]} does not match expected {expected}"
         )
@@ -41,19 +82,9 @@ def _check_resolution(df: pd.DataFrame, resolution: Resolution, label: str) -> N
 
 def _check_ohlcv_constraints_vectorized(df: pd.DataFrame, label: str) -> None:
     """Vectorized OHLCV constraint check. Raises on violation."""
-    o, h, low_, c = df["open"], df["high"], df["low"], df["close"]
-    all_present = o.notna() & h.notna() & low_.notna() & c.notna()
-    if not all_present.any():
-        return
-    valid = all_present
-    ok = (
-        (low_[valid] <= o[valid])
-        & (o[valid] <= h[valid])
-        & (low_[valid] <= c[valid])
-        & (c[valid] <= h[valid])
-    )
-    if not ok.all():
-        bad_idx = ok[~ok].index[0]
+    violations = _find_ohlcv_violations(df)
+    if len(violations) > 0 and violations.any():
+        bad_idx = violations[violations].index[0]
         row = df.loc[bad_idx]
         raise SchemaValidationError(
             f"[{label}] OHLCV constraint violation at {bad_idx}: "

@@ -14,6 +14,7 @@ from fin3.exceptions import (
     StorageError,
 )
 from fin3.schemas import AssetType, Resolution
+from fin3.utils.integrity import IntegrityIssue, IntegrityReport, check_integrity
 
 __all__ = [
     "AssetType",
@@ -22,6 +23,8 @@ __all__ = [
     "ConfigurationError",
     "DataValidationError",
     "Fin3Error",
+    "IntegrityIssue",
+    "IntegrityReport",
     "MarketDataFetcher",
     "ProviderError",
     "ProviderRateLimitError",
@@ -29,4 +32,5 @@ __all__ = [
     "Resolution",
     "SchemaValidationError",
     "StorageError",
+    "check_integrity",
 ]
