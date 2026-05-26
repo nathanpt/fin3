@@ -13,6 +13,7 @@ from fin3.exceptions import BoundaryMismatchError
 from fin3.metadata.asset_profile import MetadataStore
 from fin3.providers import ProviderRegistry
 from fin3.providers.base import DataProvider
+from fin3.inspect import LibraryOverview, inspect_library
 from fin3.schemas import OHLCV_COLUMNS, AssetType, Resolution, empty_ohlcv, library_name
 from fin3.storage.arctic import ArcticStorage
 from fin3.utils.date_utils import detect_gaps, ensure_utc
@@ -67,6 +68,45 @@ class MarketDataFetcher:
                 per_symbol[symbol] = empty_ohlcv()
 
         return _align_symbols(per_symbol)
+
+    def inspect(
+        self,
+        asset_type: AssetType,
+        provider: str,
+        resolution: Resolution,
+        *,
+        include_integrity: bool = False,
+    ) -> LibraryOverview:
+        """Inspect a library and return per-symbol data profiles.
+
+        Provides visibility into what data is stored: date ranges, row counts,
+        null bars, and optionally integrity issue counts.
+
+        Parameters
+        ----------
+        asset_type : AssetType
+            Asset type (determines calendar for integrity checks).
+        provider : str
+            Provider name (e.g. ``"databento"``).
+        resolution : Resolution
+            Bar resolution.
+        include_integrity : bool
+            If True, run bar-level integrity checks per symbol.
+
+        Returns
+        -------
+        LibraryOverview
+            Per-symbol profiles and aggregated stats.
+        """
+        lib_name = library_name(asset_type, resolution, provider)
+        strategy = asset_type.calendar_strategy
+        return inspect_library(
+            self._storage,
+            lib_name,
+            resolution,
+            include_integrity=include_integrity,
+            calendar_strategy=strategy,
+        )
 
     def _ensure_symbol(
         self,

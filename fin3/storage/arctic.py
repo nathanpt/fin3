@@ -195,13 +195,23 @@ class ArcticStorage:
         library: str,
         symbol: str,
         date_range: tuple[datetime | None, datetime | None] | None = None,
+        columns: list[str] | None = None,
     ) -> pd.DataFrame | None:
-        """Read data for *symbol* from *library*. Returns None if symbol not found."""
+        """Read data for *symbol* from *library*. Returns None if symbol not found.
+
+        Parameters
+        ----------
+        columns : list[str] or None
+            If provided, only read the specified columns from storage.
+            The index is always returned regardless.
+        """
         lib = self._get_or_create_library(library)
         try:
             kwargs: dict[str, Any] = {}
             if date_range is not None:
                 kwargs["date_range"] = date_range
+            if columns is not None:
+                kwargs["columns"] = columns
             result = lib.read(symbol, **kwargs)
             return result.data  # type: ignore[no-any-return]
         except adb.exceptions.NoSuchVersionException:
@@ -257,3 +267,18 @@ class ArcticStorage:
             return True
         except adb.exceptions.NoSuchVersionException:
             return False
+
+    def get_symbol_size(self, library: str, symbol: str) -> int:
+        """Return compressed storage size in bytes for a symbol.
+
+        Returns 0 if the symbol does not exist.
+        """
+        from arcticdb.version_store.admin_tools import sum_sizes
+
+        lib = self._get_or_create_library(library)
+        try:
+            sizes = lib.admin_tools().get_sizes_for_symbol(symbol)
+            total = sum_sizes(sizes.values())
+            return int(total.bytes_compressed)
+        except Exception:
+            return 0
