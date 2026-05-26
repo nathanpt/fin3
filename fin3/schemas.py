@@ -77,8 +77,18 @@ class Resolution(str, Enum):
 
 
 def library_name(asset_type: AssetType, resolution: Resolution, provider: str) -> str:
-    """Build the ArcticDB library name: ``{asset_type}-{resolution}-{provider}``."""
-    return f"{asset_type.value}-{resolution.value}-{provider}"
+    """Build the ArcticDB library/bucket name: ``{asset_type}-{resolution}-{provider}``.
+
+    Convention matches existing MinIO buckets: ``equities-1m-databento``,
+    ``crypto-tick-databento``, etc.
+    """
+    _ASSET_PREFIX: dict[AssetType, str] = {
+        AssetType.EQUITY_US: "equities",
+        AssetType.CRYPTO: "crypto-tick",
+        AssetType.FUTURES: "futures",
+    }
+    prefix = _ASSET_PREFIX.get(asset_type, asset_type.value)
+    return f"{prefix}-{resolution.value}-{provider}"
 
 
-METADATA_LIBRARY = "fin3.metadata"
+METADATA_LIBRARY = "fin3-metadata"

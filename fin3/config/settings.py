@@ -13,6 +13,10 @@ class MinioConfig(BaseModel):
     access_key: str
     secret_key: str
     secure: bool = False
+    bucket: str = ""
+    """When set, all libraries are stored inside this single bucket
+    (library name used as ArcticDB library name). When empty, each
+    library maps to its own S3 bucket."""
 
 
 class DatabentoConfig(BaseModel):

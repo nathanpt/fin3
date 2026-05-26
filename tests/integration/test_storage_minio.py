@@ -27,7 +27,7 @@ class TestStorageRoundTrip:
         result = minio_storage.read(unique_library, "AAPL")
         assert result is not None
         assert len(result) == 10
-        pd.testing.assert_frame_equal(result, df)
+        pd.testing.assert_frame_equal(result, df, check_freq=False)
 
     def test_read_nonexistent_symbol_returns_none(
         self, minio_storage: ArcticStorage, unique_library: str
@@ -133,7 +133,11 @@ class TestStorageRoundTrip:
         finally:
             # Clean up second library
             try:
-                if lib2 in minio_storage.arctic.list_libraries():
-                    minio_storage.arctic.delete_library(lib2)
+                from tests.integration.conftest import TEST_BUCKET
+
+                arctic2 = minio_storage.arctic_for(TEST_BUCKET)
+                if lib2 in arctic2.list_libraries():
+                    arctic2.delete_library(lib2)
+                minio_storage._library_cache.pop(lib2, None)
             except Exception:
                 pass

@@ -2,7 +2,9 @@
 
 from datetime import datetime, timezone
 
+import pytest
 
+from fin3.exceptions import StorageError
 from fin3.storage.arctic import ArcticStorage
 from tests.conftest import make_ohlcv
 
@@ -65,3 +67,31 @@ class TestArcticStorage:
         lib = storage.arctic["test-lib"]
         item = lib.read("AAPL")
         assert item.metadata == meta
+
+
+class TestArcticStorageEdgeCases:
+    def test_arctic_property_empty_raises(self) -> None:
+        storage = ArcticStorage.__new__(ArcticStorage)
+        storage._arctic_cache = {}
+        with pytest.raises(StorageError, match="No Arctic instances"):
+            _ = storage.arctic
+
+    def test_read_nonexistent_library_returns_none(self, storage: ArcticStorage) -> None:
+        result = storage.read("brand-new-lib", "NOEXIST")
+        assert result is None
+
+    def test_write_and_update_cycle(self, storage: ArcticStorage) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+        storage.write("cycle-lib", "AAPL", df)
+
+        update = make_ohlcv("2024-01-02 09:35", periods=3, freq="1min", base_price=200.0)
+        start = update.index[0].to_pydatetime()
+        end = update.index[-1].to_pydatetime()
+        storage.update("cycle-lib", "AAPL", update, date_range=(start, end))
+
+        result = storage.read("cycle-lib", "AAPL")
+        assert result is not None
+        assert len(result) == 10
+        # First 5 rows unchanged, rows 5-7 updated
+        assert result.iloc[0]["close"] == pytest.approx(100.2)
+        assert result.iloc[5]["close"] == pytest.approx(200.2)

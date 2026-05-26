@@ -27,7 +27,10 @@ class ExchangeCalendarStrategy:
     ) -> pd.DatetimeIndex:
         naive_start = start.tz_localize(None) if start.tz is not None else start
         naive_end = end.tz_localize(None) if end.tz is not None else end
-        sessions = self._calendar.sessions_in_range(naive_start, naive_end)
+        # sessions_in_range requires date-only inputs (midnight)
+        date_start = naive_start.normalize()
+        date_end = naive_end.normalize()
+        sessions = self._calendar.sessions_in_range(date_start, date_end)
         freq = resolution.timedelta_alias
 
         all_bars: list[pd.DatetimeIndex] = []
@@ -45,6 +48,11 @@ class ExchangeCalendarStrategy:
         combined = pd.DatetimeIndex(pd.concat([pd.Series(idx) for idx in all_bars]))
         if combined.tz is None:
             combined = combined.tz_localize("UTC")
+        # Trim to the requested range when start/end carry intraday time
+        utc_start = start if start.tz is not None else start.tz_localize("UTC")
+        utc_end = end if end.tz is not None else end.tz_localize("UTC")
+        if utc_start != utc_start.normalize() or utc_end != utc_end.normalize():
+            combined = combined[(combined >= utc_start) & (combined <= utc_end)]
         return combined
 
 

@@ -55,6 +55,9 @@ if not _has_integration_env():
 # Config fixtures
 # ---------------------------------------------------------------------------
 
+TEST_BUCKET = "test-integration-e2e"
+
+
 @pytest.fixture(scope="session")
 def minio_config() -> MinioConfig:
     return MinioConfig(
@@ -62,6 +65,7 @@ def minio_config() -> MinioConfig:
         access_key=_env("FIN3_MINIO__ACCESS_KEY"),
         secret_key=_env("FIN3_MINIO__SECRET_KEY"),
         secure=_env("FIN3_MINIO__SECURE", "false").lower() == "true",
+        bucket=TEST_BUCKET,
     )
 
 
@@ -114,11 +118,12 @@ def unique_library(minio_storage: ArcticStorage) -> Generator[str, None, None]:
     _lib_counter += 1
     name = f"test-integration-{_lib_counter}"
     yield name
-    # cleanup
+    # cleanup: delete the library from the shared test bucket
     try:
-        if name in minio_storage.arctic.list_libraries():
-            minio_storage.arctic.delete_library(name)
-            minio_storage._library_cache.pop(name, None)
+        arctic = minio_storage.arctic_for(TEST_BUCKET)
+        if name in arctic.list_libraries():
+            arctic.delete_library(name)
+        minio_storage._library_cache.pop(name, None)
     except Exception:
         pass
 
@@ -130,8 +135,8 @@ def unique_library(minio_storage: ArcticStorage) -> Generator[str, None, None]:
 RECENT_TRADING_DAY = "2024-06-03"
 
 RANGE_1M = (
-    datetime(2024, 6, 3, 9, 30, tzinfo=timezone.utc),
-    datetime(2024, 6, 3, 9, 35, tzinfo=timezone.utc),
+    datetime(2024, 6, 3, 13, 30, tzinfo=timezone.utc),
+    datetime(2024, 6, 3, 13, 35, tzinfo=timezone.utc),
 )
 RANGE_1H = (
     datetime(2024, 6, 3, 14, 0, tzinfo=timezone.utc),

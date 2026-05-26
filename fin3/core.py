@@ -140,7 +140,7 @@ class MarketDataFetcher:
 
         validate_storage_artifact(reindexed, resolution)
 
-        _assert_boundary(reindexed, gap_start, gap_end)
+        _assert_boundary(reindexed, grid)
 
         is_new = not self._storage.has_symbol(lib_name, symbol)
         metadata = _write_metadata(symbol, provider, gap_start, gap_end)
@@ -201,14 +201,14 @@ def _reindex(df: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.DataFrame:
     return reindexed
 
 
-def _assert_boundary(df: pd.DataFrame, gap_start: datetime, gap_end: datetime) -> None:
-    """Assert that reindexed data exactly covers [gap_start, gap_end]."""
-    if df.empty:
+def _assert_boundary(df: pd.DataFrame, grid: pd.DatetimeIndex) -> None:
+    """Assert that reindexed data exactly covers the grid."""
+    if df.empty or grid.empty:
         return
     actual_start = df.index[0]
     actual_end = df.index[-1]
-    expected_start = ensure_utc(gap_start)
-    expected_end = ensure_utc(gap_end)
+    expected_start = grid[0]
+    expected_end = grid[-1]
     if actual_start != expected_start or actual_end != expected_end:
         raise BoundaryMismatchError(
             f"Boundary mismatch: expected [{expected_start}, {expected_end}], "

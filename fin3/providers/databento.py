@@ -75,6 +75,8 @@ class DatabentoProvider(DataProvider):
                 return _normalise(df)
             except Exception as exc:
                 error_str = str(exc).lower()
+                if "data_start_after_available_end" in error_str:
+                    return empty_ohlcv()
                 if "429" in error_str or "rate" in error_str:
                     if attempt < MAX_RETRIES - 1:
                         backoff = min(

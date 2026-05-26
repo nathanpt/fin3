@@ -41,6 +41,23 @@ class TestStage1Validation:
         df.iloc[0, df.columns.get_loc("open")] = np.nan
         validate_raw_provider_data(df, Resolution.ONE_MINUTE)
 
+    def test_non_monotonic_timestamps_rejected(self) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        df = df.iloc[[1, 0, 2, 3, 4]]  # swap first two rows
+        with pytest.raises(SchemaValidationError, match="monotonically"):
+            validate_raw_provider_data(df, Resolution.ONE_MINUTE)
+
+    def test_resolution_mismatch_rejected(self) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        with pytest.raises(SchemaValidationError, match="spacing"):
+            validate_raw_provider_data(df, Resolution.ONE_HOUR)
+
+    def test_missing_volume_column_rejected(self) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        df = df.drop(columns=["volume"])
+        with pytest.raises(SchemaValidationError, match="volume"):
+            validate_raw_provider_data(df, Resolution.ONE_MINUTE)
+
 
 class TestStage2Validation:
     def test_valid_artifact_passes(self) -> None:
@@ -79,4 +96,10 @@ class TestStage2Validation:
         df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
         df.iloc[0, df.columns.get_loc("volume")] = np.nan
         with pytest.raises(DataValidationError, match="volume must never be NaN"):
+            validate_storage_artifact(df, Resolution.ONE_MINUTE)
+
+    def test_non_monotonic_timestamps_rejected_stage2(self) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        df = df.iloc[[1, 0, 2, 3, 4]]
+        with pytest.raises(SchemaValidationError, match="monotonically"):
             validate_storage_artifact(df, Resolution.ONE_MINUTE)

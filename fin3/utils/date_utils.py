@@ -48,11 +48,14 @@ def _chunk_boundaries(
         if mic is None:
             return []
         cal = ec.get_calendar(mic)
-        sessions = cal.sessions_in_range(start, end)
+        naive_start = start.tz_localize(None) if start.tz is not None else start
+        naive_end = end.tz_localize(None) if end.tz is not None else end
+        sessions = cal.sessions_in_range(naive_start.normalize(), naive_end.normalize())
         chunks = []
         for session in sessions:
             s = pd.Timestamp(session)
-            chunks.append((s, s + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)))
+            s_utc = s.tz_localize("UTC")
+            chunks.append((s_utc, s_utc + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)))
         return chunks
 
 
@@ -82,6 +85,9 @@ def detect_gaps(
 
     missing_chunks: list[tuple[pd.Timestamp, pd.Timestamp]] = []
     existing_index = existing_df.index
+    # Localize tz-naive index to UTC for consistent comparison
+    if isinstance(existing_index, pd.DatetimeIndex) and existing_index.tz is None:
+        existing_index = existing_index.tz_localize("UTC")
 
     for chunk_start, chunk_end in chunks:
         mask = (existing_index >= chunk_start) & (existing_index <= chunk_end)

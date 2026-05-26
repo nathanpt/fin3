@@ -1,5 +1,7 @@
 """Tests for configuration loading."""
 
+import os
+
 import pytest
 from pydantic import ValidationError
 
@@ -10,11 +12,15 @@ from fin3.config.settings import ClientConfig, DatabentoConfig, MinioConfig
 def _no_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prevent unit tests from reading the project .env file.
 
-    pydantic-settings reads the .env file at instantiation time. We patch
-    the SettingsConfigDict so ClientConfig doesn't load .env during tests.
+    pydantic-settings reads both .env and env vars. The integration conftest
+    calls load_dotenv() at module level, polluting os.environ. We clear all
+    FIN3_ env vars so unit tests don't pick up real credentials.
     """
     original = ClientConfig.model_config.copy()
     monkeypatch.setattr(ClientConfig, "model_config", {**original, "env_file": None})
+    for key in list(os.environ):
+        if key.startswith("FIN3_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 class TestClientConfig:
