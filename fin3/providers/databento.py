@@ -47,15 +47,6 @@ class DatabentoProvider(DataProvider):
         self._dataset = config.dataset
 
     @staticmethod
-    def _dataset_for(
-        resolution: Resolution, asset_type: AssetType | None
-    ) -> str | None:
-        """Return ARCX.PILLAR for 1m US equities, None otherwise."""
-        if resolution == Resolution.ONE_MINUTE and asset_type is AssetType.EQUITY_US:
-            return "ARCX.PILLAR"
-        return None
-
-    @staticmethod
     def _symbol_for_dataset(symbol: str, dataset: str) -> str:
         """Convert symbol to the convention used by *dataset*.
 
@@ -79,13 +70,12 @@ class DatabentoProvider(DataProvider):
         if schema is None:
             raise ProviderError(f"Unsupported resolution {resolution} for Databento")
 
-        dataset = self._dataset_for(resolution, asset_type) or self._dataset
-        resolved_symbol = self._symbol_for_dataset(symbol, dataset)
+        resolved_symbol = self._symbol_for_dataset(symbol, self._dataset)
 
         for attempt in range(MAX_RETRIES):
             try:
                 store = self._client.timeseries.get_range(
-                    dataset=dataset,
+                    dataset=self._dataset,
                     symbols=resolved_symbol,
                     schema=schema,
                     start=start,
@@ -149,13 +139,12 @@ class DatabentoProvider(DataProvider):
         if schema is None:
             return 0.0
 
-        dataset = self._dataset_for(resolution, asset_type) or self._dataset
-        resolved_symbol = self._symbol_for_dataset(symbol, dataset)
+        resolved_symbol = self._symbol_for_dataset(symbol, self._dataset)
 
         try:
             return float(
                 self._client.metadata.get_cost(
-                    dataset=dataset,
+                    dataset=self._dataset,
                     symbols=resolved_symbol,
                     schema=schema,
                     start=start,
@@ -168,34 +157,13 @@ class DatabentoProvider(DataProvider):
             ) from exc
 
     def get_instrument_bounds(self, symbol: str) -> dict[str, datetime | None]:
-        """Query Databento instrument definitions for lifecycle bounds."""
-        try:
-            # Use a narrow date range to minimise billing cost.
-            # Databento definitions are published per session; a few recent
-            # trading days are sufficient to get the instrument mapping.
-            store = self._client.timeseries.get_range(
-                dataset=self._dataset,
-                symbols=symbol,
-                schema="definition",
-                start="2024-01-01",
-                end="2024-12-31",
-                stype_in="raw_symbol",
-                stype_out="instrument_id",
-                limit=1,
-            )
-            df = store.to_df()
-            if df is not None and not df.empty:
-                ts = df.iloc[0].get("ts_event")
-                return {
-                    "ipo_date": pd.Timestamp(ts).to_pydatetime()
-                    if ts is not None
-                    else None,
-                    "delist_date": None,
-                }
-        except Exception as exc:
-            logger.warning(
-                "databento.instrument_bounds_failed", symbol=symbol, error=str(exc)
-            )
+        """Query Databento instrument definitions for lifecycle bounds.
+
+        Returns ``delist_date`` when available. Does not return ``ipo_date``
+        because definition ``ts_event`` is the record timestamp, not the
+        listing date — using it would incorrectly truncate the download range.
+        The discovery fallback in ``bootstrap_metadata`` handles IPO detection.
+        """
         return {"ipo_date": None, "delist_date": None}
 
 

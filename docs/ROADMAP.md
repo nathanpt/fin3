@@ -86,7 +86,7 @@ defaults when not explicitly set.
 
 ---
 
-## 5. ~~Switch 1m Databento Data to ARCX.PILLAR~~ ✅ Done
+## 5. ~~Switch 1m Databento Data to ARCX.PILLAR~~ ✅ Done (revised)
 
 **Trigger**: Re-download of 60 symbols for `equities-1m-databento`.
 
@@ -97,10 +97,11 @@ Cost is ~$35 for all 60 symbols across 7 years. See
 `docs/databento/dataset-comparison.md` for full cost analysis.
 
 **Implementation**:
-- Hard-code `dataset="ARCX.PILLAR"` in `DatabentoProvider` when resolution is 1m
-  and asset type is equities. Keep `XNAS.ITCH` as fallback or for other resolutions.
-- Note: ARCX.PILLAR uses CMS symbol convention (`BRK B`) not Nasdaq (`BRK.B`).
-  May require symbology resolution via `client.symbol.resolve()`.
+- Originally hard-coded `ARCX.PILLAR` for all 1m equity fetches.
+- **Revised**: Neither single-exchange dataset provides full coverage. Reverted
+  to `XNAS.ITCH` as the default (configurable via `FIN3_PROVIDERS__DATABENTO__DATASET`).
+  ARCX.PILLAR can be set per-environment for Arca-heavy symbols. A future
+  consolidated feed (Polygon) or multi-dataset merge is needed for full coverage.
 
 ---
 
