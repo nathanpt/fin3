@@ -304,7 +304,7 @@ def _reindex(df: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.DataFrame:
     """Reindex *df* against *grid*, padding missing bars with volume=0, OHLC=NaN."""
     if df.empty:
         result = pd.DataFrame(index=grid, columns=list(OHLCV_COLUMNS))
-        result["volume"] = 0
+        result["volume"] = 0.0
         for col in ("open", "high", "low", "close"):
             result[col] = float("nan")
         return result
@@ -313,7 +313,7 @@ def _reindex(df: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.DataFrame:
     df = df[cols].copy()
 
     reindexed = df.reindex(grid)
-    reindexed["volume"] = reindexed["volume"].fillna(0)
+    reindexed["volume"] = reindexed["volume"].fillna(0).astype(float)
     for col in ("open", "high", "low", "close"):
         if col in reindexed.columns:
             reindexed[col] = reindexed[col].astype(float)
