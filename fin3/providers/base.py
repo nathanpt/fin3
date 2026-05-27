@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 from fin3.schemas import Resolution
+
+if TYPE_CHECKING:
+    from fin3.schemas import AssetType
 
 
 class DataProvider(ABC):
@@ -18,6 +22,8 @@ class DataProvider(ABC):
         start: datetime,
         end: datetime,
         resolution: Resolution,
+        *,
+        asset_type: AssetType | None = None,
         **kwargs: object,
     ) -> pd.DataFrame:
         """Fetch OHLCV data for a single symbol.

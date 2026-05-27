@@ -16,7 +16,7 @@ from fin3.config.settings import DatabentoConfig
 from fin3.exceptions import ProviderError, ProviderRateLimitError, ProviderTimeoutError
 from fin3.providers import ProviderRegistry
 from fin3.providers.base import DataProvider
-from fin3.schemas import OHLCV_COLUMNS, Resolution
+from fin3.schemas import OHLCV_COLUMNS, AssetType, Resolution
 from fin3.schemas import empty_ohlcv
 
 logger = structlog.get_logger(__name__)
@@ -46,23 +46,47 @@ class DatabentoProvider(DataProvider):
             ) from exc
         self._dataset = config.dataset
 
+    @staticmethod
+    def _dataset_for(
+        resolution: Resolution, asset_type: AssetType | None
+    ) -> str | None:
+        """Return ARCX.PILLAR for 1m US equities, None otherwise."""
+        if resolution == Resolution.ONE_MINUTE and asset_type is AssetType.EQUITY_US:
+            return "ARCX.PILLAR"
+        return None
+
+    @staticmethod
+    def _symbol_for_dataset(symbol: str, dataset: str) -> str:
+        """Convert symbol to the convention used by *dataset*.
+
+        ARCX.PILLAR uses CMS convention (space-separated, e.g. ``BRK B``).
+        """
+        if dataset == "ARCX.PILLAR":
+            return symbol.replace(".", " ")
+        return symbol
+
     def fetch(
         self,
         symbol: str,
         start: datetime,
         end: datetime,
         resolution: Resolution,
+        *,
+        asset_type: AssetType | None = None,
         **kwargs: object,
     ) -> pd.DataFrame:
         schema = _RESOLUTION_TO_SCHEMA.get(resolution)
         if schema is None:
             raise ProviderError(f"Unsupported resolution {resolution} for Databento")
 
+        dataset = self._dataset_for(resolution, asset_type) or self._dataset
+        resolved_symbol = self._symbol_for_dataset(symbol, dataset)
+
         for attempt in range(MAX_RETRIES):
             try:
                 store = self._client.timeseries.get_range(
-                    dataset=self._dataset,
-                    symbols=symbol,
+                    dataset=dataset,
+                    symbols=resolved_symbol,
                     schema=schema,
                     start=start,
                     end=end,
@@ -107,6 +131,41 @@ class DatabentoProvider(DataProvider):
                 ) from exc
 
         return empty_ohlcv()
+
+    def estimate_cost(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        resolution: Resolution,
+        *,
+        asset_type: AssetType | None = None,
+    ) -> float:
+        """Query Databento for the estimated cost of a download (USD).
+
+        Wraps ``client.metadata.get_cost()``. Returns a ``float``.
+        """
+        schema = _RESOLUTION_TO_SCHEMA.get(resolution)
+        if schema is None:
+            return 0.0
+
+        dataset = self._dataset_for(resolution, asset_type) or self._dataset
+        resolved_symbol = self._symbol_for_dataset(symbol, dataset)
+
+        try:
+            return float(
+                self._client.metadata.get_cost(
+                    dataset=dataset,
+                    symbols=resolved_symbol,
+                    schema=schema,
+                    start=start,
+                    end=end,
+                )
+            )
+        except Exception as exc:
+            raise ProviderError(
+                f"Databento cost estimate failed for {symbol}: {exc}"
+            ) from exc
 
     def get_instrument_bounds(self, symbol: str) -> dict[str, datetime | None]:
         """Query Databento instrument definitions for lifecycle bounds."""

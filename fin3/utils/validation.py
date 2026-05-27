@@ -32,13 +32,18 @@ def _is_monotonic(df: pd.DataFrame) -> bool:
 def _find_bad_spacings(df: pd.DataFrame, resolution: Resolution) -> pd.Series:
     """Return a Series of timestamp diffs that don't match *resolution*.
 
+    Only checks within-session spacings. Inter-session gaps (overnight, weekends)
+    are excluded because they are expected for exchange-aligned intraday data.
     Empty Series means all spacings are correct (or df has < 2 rows).
     """
     if len(df) < 2:
         return pd.Series(dtype="timedelta64[ns]")
     diffs = pd.Series(df.index).diff().dropna()
     expected = pd.tseries.frequencies.to_offset(resolution.timedelta_alias)
-    return diffs[diffs != expected]
+    # Filter to within-session diffs only: skip gaps larger than the resolution.
+    # Inter-session gaps (overnight/weekend) are always > resolution for intraday data.
+    within_session = diffs[diffs <= pd.Timedelta(resolution.timedelta_alias)]
+    return within_session[within_session != expected]
 
 
 def _find_ohlcv_violations(df: pd.DataFrame) -> pd.Series:

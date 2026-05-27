@@ -256,6 +256,12 @@ class ArcticStorage:
             raise StorageError(f"Failed to update {library}/{symbol}") from exc
         logger.info("storage.update", library=library, symbol=symbol, rows=len(data))
 
+    def delete_symbol(self, library: str, symbol: str) -> None:
+        """Delete all versions of a symbol from the library."""
+        lib = self._get_or_create_library(library)
+        lib.delete(symbol)
+        logger.info("storage.delete", library=library, symbol=symbol)
+
     def list_symbols(self, library: str) -> list[str]:
         lib = self._get_or_create_library(library)
         return lib.list_symbols()  # type: ignore[no-any-return]

@@ -9,7 +9,7 @@ import structlog
 
 from fin3.calendar.exchange import CalendarStrategy
 from fin3.config.settings import ClientConfig
-from fin3.exceptions import BoundaryMismatchError
+from fin3.exceptions import BoundaryMismatchError, CostLimitExceededError
 from fin3.metadata.asset_profile import MetadataStore
 from fin3.providers import ProviderRegistry
 from fin3.providers.base import DataProvider
@@ -41,18 +41,32 @@ class MarketDataFetcher:
         symbols: list[str],
         start: datetime,
         end: datetime,
+        *,
+        max_cost: float | None = None,
         **kwargs: object,
     ) -> pd.DataFrame:
         """Fetch OHLCV data, filling gaps from the provider as needed.
 
         Returns a wide-format DataFrame with ``(symbol, field)`` MultiIndex
         columns and a single aligned UTC DatetimeIndex.
+
+        Parameters
+        ----------
+        max_cost : float or None
+            If set, estimate total download cost before fetching and raise
+            ``CostLimitExceededError`` when the estimate exceeds this limit.
         """
         _validate_inputs(asset_type, provider, resolution, symbols, start, end)
 
         lib_name = library_name(asset_type, resolution, provider)
         prov = self._providers.get(provider)
         strategy = asset_type.calendar_strategy
+
+        if max_cost is not None and hasattr(prov, "estimate_cost"):
+            self._check_cost(
+                lib_name, symbols, prov, strategy, asset_type, resolution,
+                start, end, max_cost,
+            )
 
         for symbol in symbols:
             self._ensure_symbol(
@@ -108,6 +122,78 @@ class MarketDataFetcher:
             calendar_strategy=strategy,
         )
 
+    def _symbol_gaps(
+        self,
+        lib_name: str,
+        symbol: str,
+        provider: DataProvider,
+        asset_type: AssetType,
+        resolution: Resolution,
+        start: datetime,
+        end: datetime,
+    ) -> list[tuple[datetime, datetime]]:
+        """Compute gaps for *symbol* after IPO/delist clamping."""
+        ipo_date, delist_date = self._metadata.bootstrap_metadata(
+            symbol, provider, start, end
+        )
+
+        eff_start, eff_end = start, end
+        if ipo_date is not None:
+            ipo_ts = ensure_utc(ipo_date).to_pydatetime()
+            if ipo_ts > start:
+                eff_start = ipo_ts
+        if delist_date is not None:
+            delist_ts = ensure_utc(delist_date).to_pydatetime()
+            if delist_ts < end:
+                eff_end = delist_ts
+
+        if eff_start >= eff_end:
+            return []
+
+        existing = self._storage.read(
+            lib_name, symbol, date_range=(eff_start, eff_end)
+        )
+        return detect_gaps(existing, eff_start, eff_end, asset_type, resolution)
+
+    def _check_cost(
+        self,
+        lib_name: str,
+        symbols: list[str],
+        provider: DataProvider,
+        strategy: CalendarStrategy,
+        asset_type: AssetType,
+        resolution: Resolution,
+        start: datetime,
+        end: datetime,
+        max_cost: float,
+    ) -> None:
+        """Estimate total download cost and raise if it exceeds *max_cost*."""
+        total_cost = 0.0
+        for symbol in symbols:
+            gaps = self._symbol_gaps(
+                lib_name, symbol, provider, asset_type, resolution, start, end
+            )
+            for gap_start, gap_end in gaps:
+                total_cost += provider.estimate_cost(  # type: ignore[attr-defined]
+                    symbol=symbol,
+                    start=gap_start,
+                    end=gap_end,
+                    resolution=resolution,
+                    asset_type=asset_type,
+                )
+
+        logger.info(
+            "core.cost_estimate",
+            total_cost=total_cost,
+            max_cost=max_cost,
+        )
+        if total_cost > max_cost:
+            raise CostLimitExceededError(
+                f"Estimated cost ${total_cost:.2f} exceeds max_cost ${max_cost:.2f}",
+                estimated_cost=total_cost,
+                max_cost=max_cost,
+            )
+
     def _ensure_symbol(
         self,
         lib_name: str,
@@ -120,27 +206,9 @@ class MarketDataFetcher:
         end: datetime,
     ) -> None:
         """Ensure *symbol* has full coverage for [start, end] in the library."""
-        ipo_date, delist_date = self._metadata.bootstrap_metadata(
-            symbol, provider, start, end
+        gaps = self._symbol_gaps(
+            lib_name, symbol, provider, asset_type, resolution, start, end
         )
-
-        eff_start = start
-        eff_end = end
-        if ipo_date is not None:
-            ipo_ts = ensure_utc(ipo_date).to_pydatetime()
-            if ipo_ts > start:
-                eff_start = ipo_ts
-        if delist_date is not None:
-            delist_ts = ensure_utc(delist_date).to_pydatetime()
-            if delist_ts < end:
-                eff_end = delist_ts
-
-        if eff_start >= eff_end:
-            logger.info("core.no_valid_range", symbol=symbol)
-            return
-
-        existing = self._storage.read(lib_name, symbol, date_range=(eff_start, eff_end))
-        gaps = detect_gaps(existing, eff_start, eff_end, asset_type, resolution)
 
         if not gaps:
             logger.info("core.full_coverage", symbol=symbol)
@@ -150,7 +218,14 @@ class MarketDataFetcher:
 
         for gap_start, gap_end in gaps:
             self._fill_gap(
-                lib_name, symbol, provider, strategy, resolution, gap_start, gap_end
+                lib_name,
+                symbol,
+                provider,
+                strategy,
+                resolution,
+                gap_start,
+                gap_end,
+                asset_type=asset_type,
             )
 
     def _fill_gap(
@@ -162,10 +237,15 @@ class MarketDataFetcher:
         resolution: Resolution,
         gap_start: datetime,
         gap_end: datetime,
+        asset_type: AssetType | None = None,
     ) -> None:
         """Fetch, validate, reindex, and store data for a single gap."""
         raw_df = provider.fetch(
-            symbol=symbol, start=gap_start, end=gap_end, resolution=resolution
+            symbol=symbol,
+            start=gap_start,
+            end=gap_end,
+            resolution=resolution,
+            asset_type=asset_type,
         )
 
         validate_raw_provider_data(raw_df, resolution)

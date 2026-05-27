@@ -53,3 +53,17 @@ class BoundaryMismatchError(DataValidationError):
         self.expected_end = expected_end
         self.actual_start = actual_start
         self.actual_end = actual_end
+
+
+class CostLimitExceededError(Fin3Error):
+    """Estimated download cost exceeds the configured max_cost limit."""
+
+    def __init__(
+        self,
+        message: str,
+        estimated_cost: float = 0.0,
+        max_cost: float = 0.0,
+    ) -> None:
+        super().__init__(message)
+        self.estimated_cost = estimated_cost
+        self.max_cost = max_cost
