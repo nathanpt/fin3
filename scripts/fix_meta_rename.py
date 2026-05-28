@@ -19,7 +19,7 @@ import argparse
 from datetime import datetime, timezone
 
 from fin3.config.settings import ClientConfig
-from fin3.core import _reindex, _snap_to_grid_dates
+from fin3.core import _reindex, _snap_to_grid
 from fin3.providers.databento import DatabentoProvider
 from fin3.schemas import AssetType, Resolution
 from fin3.storage.arctic import ArcticStorage
@@ -98,9 +98,9 @@ def main() -> None:
         resolution,
     )
 
-    # Snap midnight timestamps to market-open for daily resolution
-    if resolution == Resolution.ONE_DAY and not raw_df.empty and len(grid) > 0:
-        raw_df = _snap_to_grid_dates(raw_df, grid)
+    # Snap provider timestamps to calendar grid convention
+    if not raw_df.empty and len(grid) > 0:
+        raw_df = _snap_to_grid(raw_df, grid, resolution)
 
     reindexed = _reindex(raw_df, grid)
     validate_storage_artifact(reindexed, resolution)

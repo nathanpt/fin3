@@ -212,3 +212,36 @@ class TestCostGate:
 
         assert isinstance(result, pd.DataFrame)
         mock_provider.estimate_cost.assert_not_called()
+
+
+class TestEmptyDataGuard:
+    """Tests for Bug 2: non-existent symbols should not persist null grids."""
+
+    def test_empty_data_new_symbol_not_stored(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Provider returns empty data for a new symbol — nothing stored."""
+        fetcher = _make_fetcher(lmdb_storage)
+
+        mock_provider = MagicMock()
+        mock_provider.fetch.return_value = pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+            index=pd.DatetimeIndex([], tz="UTC"),
+        )
+        mock_provider.get_instrument_bounds = MagicMock(
+            return_value={"ipo_date": None, "delist_date": None}
+        )
+        fetcher._providers._providers = {"databento": mock_provider}
+
+        result = fetcher.get_data(
+            asset_type=AssetType.CRYPTO,
+            provider="databento",
+            resolution=Resolution.ONE_HOUR,
+            symbols=["FAKESYMBOL"],
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 2, tzinfo=timezone.utc),
+        )
+
+        assert isinstance(result, pd.DataFrame)
+        # Should NOT have stored anything for this symbol
+        assert not lmdb_storage.has_symbol("crypto-tick-1h-databento", "FAKESYMBOL")

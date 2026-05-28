@@ -175,7 +175,7 @@ class MarketDataFetcher:
     ) -> list[tuple[datetime, datetime]]:
         """Compute gaps for *symbol* after IPO/delist clamping."""
         ipo_date, delist_date = self._metadata.bootstrap_metadata(
-            symbol, provider, start, end
+            symbol, provider, start, end, resolution=resolution
         )
 
         eff_start, eff_end = start, end
@@ -291,17 +291,29 @@ class MarketDataFetcher:
 
         validate_raw_provider_data(raw_df, resolution)
 
+        is_new = not self._storage.has_symbol(lib_name, symbol)
+
+        if raw_df.empty and is_new:
+            logger.info(
+                "core.no_data_new_symbol",
+                symbol=symbol,
+                gap_start=gap_start.isoformat(),
+                gap_end=gap_end.isoformat(),
+            )
+            return
+
         grid = strategy.generate_grid(
             ensure_utc(gap_start),
             ensure_utc(gap_end),
             resolution,
         )
 
-        # Providers may return daily bars at midnight UTC, but our grid
-        # uses market-open timestamps (e.g. 14:30 UTC for NYSE). Snap
-        # the raw data to the grid's timestamps so reindexing aligns.
-        if resolution == Resolution.ONE_DAY and not raw_df.empty and len(grid) > 0:
-            raw_df = _snap_to_grid_dates(raw_df, grid)
+        # Providers may return bars at timestamps that don't align with the
+        # calendar grid (e.g. daily bars at midnight UTC vs market-open,
+        # or hourly bars at whole-hour UTC vs market-open offsets).
+        # Snap the raw data to the grid's timestamps so reindexing aligns.
+        if not raw_df.empty and len(grid) > 0:
+            raw_df = _snap_to_grid(raw_df, grid, resolution)
 
         reindexed = _reindex(raw_df, grid)
 
@@ -309,7 +321,6 @@ class MarketDataFetcher:
 
         _assert_boundary(reindexed, grid)
 
-        is_new = not self._storage.has_symbol(lib_name, symbol)
         metadata = _write_metadata(symbol, provider, gap_start, gap_end)
 
         if is_new:
@@ -368,24 +379,46 @@ def _reindex(df: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.DataFrame:
     return reindexed
 
 
-def _snap_to_grid_dates(df: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.DataFrame:
-    """Snap daily bar timestamps from midnight UTC to the grid's market-open times.
+def _snap_to_grid(df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resolution) -> pd.DataFrame:
+    """Snap provider timestamps to the calendar grid.
 
-    Providers like Databento return OHLCV-1D bars timestamped at 00:00 UTC,
-    but the calendar grid uses market-open times (e.g. 14:30 UTC for NYSE).
-    This remaps each bar's date to the corresponding grid timestamp.
+    Providers return bars at timestamps that may not match the grid convention:
+    - Daily: midnight UTC -> market-open (e.g. 14:30 UTC for NYSE)
+    - Intraday: whole-hour UTC -> market-open offsets (e.g. 14:30, 15:30, ...)
     """
-    # Build a date -> grid_timestamp lookup
-    grid_dates = {ts.normalize(): ts for ts in grid}
-
-    new_index = []
-    for ts in df.index:
-        normalized = ts.tz_convert("UTC").normalize() if ts.tz is not None else pd.Timestamp(ts).tz_localize("UTC").normalize()
-        grid_ts = grid_dates.get(normalized)
-        new_index.append(grid_ts if grid_ts is not None else ts)
-
     df = df.copy()
+
+    if resolution == Resolution.ONE_DAY:
+        # Exact date-based mapping for daily bars
+        grid_dates = {ts.normalize(): ts for ts in grid}
+        new_index = []
+        for ts in df.index:
+            normalized = ts.tz_convert("UTC").normalize() if ts.tz is not None else pd.Timestamp(ts).tz_localize("UTC").normalize()
+            grid_ts = grid_dates.get(normalized)
+            new_index.append(grid_ts if grid_ts is not None else ts)
+        df.index = pd.DatetimeIndex(new_index)
+        return df
+
+    # Intraday: nearest-neighbor alignment with tolerance
+    median_spacing = pd.Series(grid).diff().dropna().median()
+    tolerance = median_spacing / 2
+
+    grid_idx = grid.get_indexer(df.index, method="nearest", tolerance=tolerance)
+    new_index = []
+    used_grid_positions: set[int] = set()
+    for i, pos in enumerate(grid_idx):
+        pos_int = int(pos)
+        if pos_int == -1 or pos_int in used_grid_positions:
+            # No nearby grid point, or collision — keep original timestamp
+            # (will become a null row after reindex)
+            new_index.append(df.index[i])
+        else:
+            new_index.append(grid[pos_int])
+            used_grid_positions.add(pos_int)
+
     df.index = pd.DatetimeIndex(new_index)
+    # Drop duplicate index entries (keep first) to avoid reindex issues
+    df = df[~df.index.duplicated(keep="first")]
     return df
 
 

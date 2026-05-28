@@ -62,6 +62,8 @@ class MetadataStore:
         provider: Any,
         start: datetime,
         end: datetime,
+        *,
+        resolution: Any | None = None,
     ) -> tuple[datetime | None, datetime | None]:
         """Resolve lifecycle bounds via cache -> provider ref API -> discovery fetch.
 
@@ -97,7 +99,14 @@ class MetadataStore:
 
         if ipo_date is None:
             try:
-                discovery_df = provider.fetch(symbol=symbol, start=start, end=end)
+                fetch_kwargs: dict[str, Any] = {
+                    "symbol": symbol,
+                    "start": start,
+                    "end": end,
+                }
+                if resolution is not None:
+                    fetch_kwargs["resolution"] = resolution
+                discovery_df = provider.fetch(**fetch_kwargs)
                 if discovery_df is not None and not discovery_df.empty:
                     ipo_date = discovery_df.index[0].to_pydatetime()
                     logger.info("metadata.discovery", symbol=symbol, ipo_date=ipo_date)

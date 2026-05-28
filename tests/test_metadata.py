@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from fin3.metadata.asset_profile import MetadataStore
+from fin3.schemas import Resolution
 from fin3.storage.arctic import ArcticStorage
 from tests.conftest import make_ohlcv
 
@@ -45,6 +46,7 @@ class TestBootstrapMetadata:
             "AAPL", provider,
             datetime(2024, 1, 1, tzinfo=timezone.utc),
             datetime(2024, 1, 2, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
         )
         assert ipo == datetime(2020, 1, 1)
         assert delist is None
@@ -53,6 +55,7 @@ class TestBootstrapMetadata:
             "AAPL", provider,
             datetime(2024, 1, 1, tzinfo=timezone.utc),
             datetime(2024, 1, 2, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
         )
         assert ipo2 == datetime(2020, 1, 1)
         assert provider.get_instrument_bounds.call_count == 1
@@ -68,9 +71,34 @@ class TestBootstrapMetadata:
             "NEWTICKER", provider,
             datetime(2024, 1, 1, tzinfo=timezone.utc),
             datetime(2024, 1, 2, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_HOUR,
         )
         assert ipo is not None
-        provider.fetch.assert_called_once()
+        provider.fetch.assert_called_once_with(
+            symbol="NEWTICKER",
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_HOUR,
+        )
+
+    def test_discovery_fallback_without_resolution(self, storage: ArcticStorage) -> None:
+        """Discovery fetch without resolution still works (backward compat)."""
+        store = MetadataStore(storage)
+        provider = MagicMock()
+        provider.get_instrument_bounds.side_effect = Exception("ref failed")
+        provider.fetch.return_value = make_ohlcv("2024-01-02", periods=3, freq="1h")
+
+        ipo, _ = store.bootstrap_metadata(
+            "NEWTICKER2", provider,
+            datetime(2024, 1, 1, tzinfo=timezone.utc),
+            datetime(2024, 1, 2, tzinfo=timezone.utc),
+        )
+        assert ipo is not None
+        provider.fetch.assert_called_once_with(
+            symbol="NEWTICKER2",
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 2, tzinfo=timezone.utc),
+        )
 
     def test_all_fail_stores_none(self, storage: ArcticStorage) -> None:
         """Both ref and discovery fail — stores None ipo_date."""
@@ -83,6 +111,7 @@ class TestBootstrapMetadata:
             "BADDATA", provider,
             datetime(2024, 1, 1, tzinfo=timezone.utc),
             datetime(2024, 1, 2, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
         )
         assert ipo is None
         # Verify it was cached (no repeated attempts)
