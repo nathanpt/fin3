@@ -16,6 +16,7 @@ from fin3.providers.base import DataProvider
 from fin3.inspect import LibraryOverview, inspect_library
 from fin3.schemas import OHLCV_COLUMNS, AssetType, Resolution, empty_ohlcv, library_name
 from fin3.storage.arctic import ArcticStorage
+from fin3.storage.defrag import DefragReport, defragment_library
 from fin3.utils.date_utils import detect_gaps, ensure_utc
 from fin3.utils.logging import configure_logging
 from fin3.utils.validation import validate_raw_provider_data, validate_storage_artifact
@@ -43,6 +44,7 @@ class MarketDataFetcher:
         end: datetime,
         *,
         max_cost: float | None = None,
+        defrag: bool = False,
         **kwargs: object,
     ) -> pd.DataFrame:
         """Fetch OHLCV data, filling gaps from the provider as needed.
@@ -55,6 +57,9 @@ class MarketDataFetcher:
         max_cost : float or None
             If set, estimate total download cost before fetching and raise
             ``CostLimitExceededError`` when the estimate exceeds this limit.
+        defrag : bool
+            If True, defragment all symbols in the library after gap-filling.
+            Useful after bulk operations that create many small segments.
         """
         _validate_inputs(asset_type, provider, resolution, symbols, start, end)
 
@@ -72,6 +77,9 @@ class MarketDataFetcher:
             self._ensure_symbol(
                 lib_name, symbol, prov, strategy, asset_type, resolution, start, end
             )
+
+        if defrag:
+            self.defragment(asset_type, provider, resolution, symbols=symbols)
 
         per_symbol: dict[str, pd.DataFrame] = {}
         for symbol in symbols:
@@ -120,6 +128,39 @@ class MarketDataFetcher:
             resolution,
             include_integrity=include_integrity,
             calendar_strategy=strategy,
+        )
+
+    def defragment(
+        self,
+        asset_type: AssetType,
+        provider: str,
+        resolution: Resolution,
+        *,
+        symbols: list[str] | None = None,
+        dry_run: bool = False,
+    ) -> DefragReport:
+        """Defragment symbols in a library to compact data segments.
+
+        Parameters
+        ----------
+        asset_type : AssetType
+        provider : str
+        resolution : Resolution
+        symbols : list[str] or None
+            Symbols to defragment. None defragments all symbols in the library.
+        dry_run : bool
+            If True, only report fragmentation without performing compaction.
+
+        Returns
+        -------
+        DefragReport
+        """
+        lib_name = library_name(asset_type, resolution, provider)
+        return defragment_library(
+            self._storage,
+            lib_name,
+            symbols=symbols,
+            dry_run=dry_run,
         )
 
     def _symbol_gaps(
@@ -256,6 +297,12 @@ class MarketDataFetcher:
             resolution,
         )
 
+        # Providers may return daily bars at midnight UTC, but our grid
+        # uses market-open timestamps (e.g. 14:30 UTC for NYSE). Snap
+        # the raw data to the grid's timestamps so reindexing aligns.
+        if resolution == Resolution.ONE_DAY and not raw_df.empty and len(grid) > 0:
+            raw_df = _snap_to_grid_dates(raw_df, grid)
+
         reindexed = _reindex(raw_df, grid)
 
         validate_storage_artifact(reindexed, resolution)
@@ -319,6 +366,27 @@ def _reindex(df: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.DataFrame:
             reindexed[col] = reindexed[col].astype(float)
 
     return reindexed
+
+
+def _snap_to_grid_dates(df: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.DataFrame:
+    """Snap daily bar timestamps from midnight UTC to the grid's market-open times.
+
+    Providers like Databento return OHLCV-1D bars timestamped at 00:00 UTC,
+    but the calendar grid uses market-open times (e.g. 14:30 UTC for NYSE).
+    This remaps each bar's date to the corresponding grid timestamp.
+    """
+    # Build a date -> grid_timestamp lookup
+    grid_dates = {ts.normalize(): ts for ts in grid}
+
+    new_index = []
+    for ts in df.index:
+        normalized = ts.tz_convert("UTC").normalize() if ts.tz is not None else pd.Timestamp(ts).tz_localize("UTC").normalize()
+        grid_ts = grid_dates.get(normalized)
+        new_index.append(grid_ts if grid_ts is not None else ts)
+
+    df = df.copy()
+    df.index = pd.DatetimeIndex(new_index)
+    return df
 
 
 def _assert_boundary(df: pd.DataFrame, grid: pd.DatetimeIndex) -> None:

@@ -1,123 +1,94 @@
 # fin3 - Roadmap
 
-Phase 2 items surfaced during design review. Each entry is deferred from Phase 1
-with a clear trigger condition that justifies implementation.
+A skill-development roadmap for fin3. Each phase builds a concrete capability
+while producing useful infrastructure. Items marked with checkmarks are done.
 
 ---
 
-## 1. Three-Way Write Routing (`write` / `append` / `update`)
+## Phase 1: Production Data Pipeline Foundations (4–6 weeks)
 
-**Trigger**: Defragmentation is becoming a maintenance burden, or trailing-gap
-writes are measurably slow.
+**Goal**: Stop vibe-coding and build something reliable.
 
-**Rationale**: Phase 1 uses two-way routing (`write` / `update`) for simplicity
-and integrity — `update(date_range=...)` is self-correcting by construction. A
-three-way router that detects trailing gaps and routes them to `append` avoids
-the read-modify-write cost of `update` and reduces segment fragmentation. This
-is a performance optimization, not a correctness fix.
+**Skill developed**: Production-grade data engineering habits.
 
-**Risk**: `append` has no `date_range` guard rail. Off-by-one errors in gap
-detection produce duplicate rows with no easy recovery (since
-`prune_previous_versions=True`). Must be paired with robust boundary assertions
-and integration tests before enabling.
+### Completed
 
-**Paired with**: Defragmentation utilities (item 2).
+- ~~Implement proper error handling, retries, and logging~~
+- ~~Add configuration management and environment separation~~
+- ~~Build automated tests for the ingestion layer~~
+- ~~Set up basic monitoring/logging for the pipeline~~
+- ~~Pre-download cost checking via `get_cost()`~~
+- ~~Dataset selection (XNAS.ITCH default, ARCX.PILLAR configurable)~~
+- ~~Configurable retry policy on DatabentoConfig~~
 
----
+### Remaining
 
-## 2. Defragmentation Maintenance Utilities
-
-**Trigger**: Read performance degrades after frequent small `update` or `append`
-operations, or as a scheduled maintenance task.
-
-**Rationale**: Each `update(date_range=...)` creates a new data segment.
-Over time, many small segments degrade read performance. ArcticDB provides
-`lib.defragment_symbol_data(symbol)` to merge segments. Phase 2 should expose
-this as a utility function or CLI command, and optionally run it automatically
-after bulk gap-filling operations.
-
-**Paired with**: Three-way write routing (item 1).
+(None — all Phase 1 items complete.)
 
 ---
 
-## 3. Concurrent Access Protection
+## Phase 2: Infrastructure & Self-Hosting Mastery (4–6 weeks)
 
-**Trigger**: Library is used on a shared dev server where multiple processes may
-call `get_data()` simultaneously.
+**Goal**: Get comfortable running real infrastructure under constraints.
 
-**Problem (document clearly)**: The current design assumes single-process
-execution. If two processes call `get_data("AAPL", ...)` concurrently on the
-same server:
+**Skill developed**: Running production self-hosted systems with real constraints.
 
-1. Both processes read the symbol from ArcticDB for gap detection.
-2. Both detect the same gap.
-3. Both fetch from the provider and call `update(date_range=...)`.
-4. The second `update` may overwrite the first (since the first may not have
-   committed yet), or produce a conflicted state.
-5. With `prune_previous_versions=True`, there is no rollback.
+- **Three-way write routing (`write` / `append` / `update`)** — Phase 1 uses
+  two-way routing for simplicity and integrity. A three-way router that detects
+  trailing gaps and routes them to `append` avoids the read-modify-write cost of
+  `update` and reduces segment fragmentation.
+  - **Trigger**: Defragmentation is becoming a maintenance burden, or
+    trailing-gap writes are measurably slow.
+  - **Risk**: `append` has no `date_range` guard rail. Off-by-one errors in gap
+    detection produce duplicate rows with no easy recovery (since
+    `prune_previous_versions=True`). Must be paired with robust boundary
+    assertions and integration tests before enabling.
+  - **Paired with**: Defragmentation utilities (next item).
 
-This is not hypothetical — it is the default failure mode on any shared server.
-Recovery requires reverting to a MinIO infrastructure-level snapshot.
+- **Defragmentation maintenance utilities** — Each `update(date_range=...)`
+  creates a new data segment. Over time, many small segments degrade read
+  performance. ArcticDB provides `lib.defragment_symbol_data(symbol)` to merge
+  segments. Expose as a utility function or CLI command, and optionally run
+  automatically after bulk gap-filling operations.
+  - **Trigger**: Read performance degrades after frequent small `update` or
+    `append` operations, or as a scheduled maintenance task.
+  - **Paired with**: Three-way write routing (previous item).
 
-**Potential solutions (evaluate at implementation time)**:
-- Advisory lock (file-based or in MinIO metadata) per symbol.
-- PID-scoped locking with timeout and deadlock detection.
-- ArcticDB staged writes (`write(staged=True)` + `finalize_staged_data()`).
+- **Concurrent access protection** — The current design assumes single-process
+  execution. If two processes call `get_data("AAPL", ...)` concurrently, both
+  detect the same gap, both fetch from the provider, and the second `update` may
+  overwrite the first or produce a conflicted state. With
+  `prune_previous_versions=True`, there is no rollback.
+  - **Trigger**: Library is used on a shared dev server where multiple processes
+    may call `get_data()` simultaneously.
+  - **Potential solutions**: Advisory lock (file-based or in MinIO metadata) per
+    symbol; PID-scoped locking with timeout and deadlock detection; ArcticDB
+    staged writes (`write(staged=True)` + `finalize_staged_data()`).
 
-**Phase 1 mitigation**: Document the constraint clearly. Operator is responsible
-for ensuring single-process access per library/symbol.
-
----
-
-## 4. Configurable Retry Policy
-
-**Trigger**: Users hitting rate limits on specific providers need to tune retry
-behavior without code changes.
-
-**Rationale**: Phase 1 uses hardcoded retry constants (`MAX_RETRIES=3`,
-`INITIAL_BACKOFF_SECONDS=1.0`, `MAX_BACKOFF_SECONDS=30.0`). These are
-reasonable defaults but not universally appropriate. Some providers (e.g.,
-free-tier Polygon) require longer backoff; others (Binance WebSocket) rarely
-need retries at all.
-
-**Implementation**: Add retry policy fields to per-provider config objects
-(e.g., `DatabentoConfig(max_retries=5, initial_backoff=2.0)`). Use provider
-defaults when not explicitly set.
+- **Resource monitoring** — Disk, memory, network tracking for the pipeline.
 
 ---
 
-## 5. ~~Switch 1m Databento Data to ARCX.PILLAR~~ ✅ Done (revised)
+## Phase 3: Data Modeling & Feature Thinking (6–8 weeks)
 
-**Trigger**: Re-download of 60 symbols for `equities-1m-databento`.
+**Goal**: Move from "store data" to "create valuable data assets."
 
-**Rationale**: `XNAS.ITCH` only captures Nasdaq trades, causing 10-20% null bars
-for symbols that primarily trade on NYSE Arca (SLV, XLRE, SMCI, MSTR, META, etc.).
-`ARCX.PILLAR` covers NYSE Arca, the leading ETF venue (~10% of US equities ADV).
-Cost is ~$35 for all 60 symbols across 7 years. See
-`docs/databento/dataset-comparison.md` for full cost analysis.
+**Skill developed**: Thinking like a data product builder.
 
-**Implementation**:
-- Originally hard-coded `ARCX.PILLAR` for all 1m equity fetches.
-- **Revised**: Neither single-exchange dataset provides full coverage. Reverted
-  to `XNAS.ITCH` as the default (configurable via `FIN3_PROVIDERS__DATABENTO__DATASET`).
-  ARCX.PILLAR can be set per-environment for Arca-heavy symbols. A future
-  consolidated feed (Polygon) or multi-dataset merge is needed for full coverage.
+- Design clean, versioned data schemas in ArcticDB
+- Build reusable data transformations (potential edge area)
+- Create derived features useful for backtesting
+- Document the data model clearly
 
 ---
 
-## 6. ~~Pre-Download Cost Checking via `get_cost()`~~ ✅ Done
+## Phase 4: AI/Agent Layer Readiness (Ongoing, start after Phase 2)
 
-**Trigger**: Next release after dataset switching.
+**Goal**: Prepare fin3 to be consumed by AI systems.
 
-**Rationale**: Databento charges per request. Before downloading large date ranges
-or many symbols, fin3 should optionally query `client.metadata.get_cost()` to
-show the estimated cost and require explicit confirmation (or enforce a budget
-limit). This prevents accidental expensive downloads.
+**Skill developed**: Building data infrastructure that AI can actually use.
 
-**Implementation**:
-- Add `estimate_cost()` method to `DatabentoProvider` wrapping
-  `client.metadata.get_cost()`. Returns a `float` (USD).
-- Add optional `max_cost` parameter to `get_data()` / `MarketDataFetcher`.
-  If set, raise before fetching when estimated cost exceeds the limit.
-- Note: `get_cost()` returns a `float`, not a dict. The `billable_cost` key
-  pattern from the docs example is incorrect.
+- Expose clean APIs or query interfaces over stored data
+- Build a simple feature store pattern
+- Experiment with making the data easily consumable by agents/LLMs
+- Add metadata and lineage tracking

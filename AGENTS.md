@@ -84,6 +84,7 @@ When working in this repository, you must strictly adhere to the following rules
 - **Testing:** All tests live in the `/tests` directory, completely separate from the `/src` directory. Use `pytest`.
 - **Error Handling:** Raise explicit exceptions (e.g., `ValueError`, custom domain exceptions). **Never** use `assert` statements in the `src/` code.
 - **Dependencies:** Do not modify `pyproject.toml` to add dependencies without explicit user authorization.
+- Update ROADMAP.md after completing items without errors or bugs. 
 
 ## Testing Guidelines
 

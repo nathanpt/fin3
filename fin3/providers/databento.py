@@ -6,12 +6,8 @@ from datetime import datetime
 
 import pandas as pd
 import structlog
+import time
 
-from fin3.config.settings import (
-    MAX_BACKOFF_SECONDS,
-    MAX_RETRIES,
-    INITIAL_BACKOFF_SECONDS,
-)
 from fin3.config.settings import DatabentoConfig
 from fin3.exceptions import ProviderError, ProviderRateLimitError, ProviderTimeoutError
 from fin3.providers import ProviderRegistry
@@ -35,6 +31,10 @@ _RESOLUTION_TO_SCHEMA: dict[Resolution, str] = {
 class DatabentoProvider(DataProvider):
     """Fetches OHLCV data from Databento's timeseries API."""
 
+    _max_retries: int = 3
+    _initial_backoff: float = 1.0
+    _max_backoff: float = 30.0
+
     def __init__(self, config: DatabentoConfig) -> None:
         try:
             import databento as db
@@ -45,6 +45,9 @@ class DatabentoProvider(DataProvider):
                 f"Failed to initialise Databento client: {exc}"
             ) from exc
         self._dataset = config.dataset
+        self._max_retries = config.max_retries
+        self._initial_backoff = config.initial_backoff
+        self._max_backoff = config.max_backoff
 
     @staticmethod
     def _symbol_for_dataset(symbol: str, dataset: str) -> str:
@@ -72,7 +75,7 @@ class DatabentoProvider(DataProvider):
 
         resolved_symbol = self._symbol_for_dataset(symbol, self._dataset)
 
-        for attempt in range(MAX_RETRIES):
+        for attempt in range(self._max_retries):
             try:
                 store = self._client.timeseries.get_range(
                     dataset=self._dataset,
@@ -92,10 +95,10 @@ class DatabentoProvider(DataProvider):
                 if "data_start_after_available_end" in error_str:
                     return empty_ohlcv()
                 if "429" in error_str or "rate" in error_str:
-                    if attempt < MAX_RETRIES - 1:
+                    if attempt < self._max_retries - 1:
                         backoff = min(
-                            INITIAL_BACKOFF_SECONDS * (2**attempt),
-                            MAX_BACKOFF_SECONDS,
+                            self._initial_backoff * (2**attempt),
+                            self._max_backoff,
                         )
                         logger.warning(
                             "provider.rate_limited",
@@ -103,15 +106,13 @@ class DatabentoProvider(DataProvider):
                             symbol=symbol,
                             backoff=backoff,
                         )
-                        import time as _time
-
-                        _time.sleep(backoff)
+                        time.sleep(backoff)
                         continue
                     raise ProviderRateLimitError(
                         f"Databento rate limit exceeded for {symbol}"
                     ) from exc
                 if "timeout" in error_str:
-                    if attempt < MAX_RETRIES - 1:
+                    if attempt < self._max_retries - 1:
                         continue
                     raise ProviderTimeoutError(
                         f"Databento timeout for {symbol}"

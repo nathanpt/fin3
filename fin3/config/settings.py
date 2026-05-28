@@ -23,6 +23,9 @@ class DatabentoConfig(BaseModel):
     provider_type: Literal["databento"] = "databento"
     api_key: str
     dataset: str = "XNAS.ITCH"
+    max_retries: int = 3
+    initial_backoff: float = 1.0
+    max_backoff: float = 30.0
 
 
 class PolygonConfig(BaseModel):
@@ -55,6 +58,3 @@ class ClientConfig(BaseSettings):
     )
 
 
-MAX_RETRIES: int = 3
-INITIAL_BACKOFF_SECONDS: float = 1.0
-MAX_BACKOFF_SECONDS: float = 30.0

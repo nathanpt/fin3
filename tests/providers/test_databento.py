@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from fin3.config.settings import DatabentoConfig
-from fin3.exceptions import ProviderError
+from fin3.exceptions import ProviderError, ProviderRateLimitError
 from fin3.providers.databento import DatabentoProvider
 from fin3.schemas import Resolution
 
@@ -208,3 +208,77 @@ class TestDatabentoEstimateCost:
                 end=datetime(2024, 1, 3, tzinfo=timezone.utc),
                 resolution=Resolution.ONE_MINUTE,
             )
+
+
+class TestDatabentoRetryConfig:
+    """Tests for configurable retry policy on DatabentoConfig."""
+
+    def test_config_accepts_custom_retry_values(self) -> None:
+        config = DatabentoConfig(
+            api_key="test_key",
+            max_retries=5,
+            initial_backoff=2.0,
+            max_backoff=60.0,
+        )
+        assert config.max_retries == 5
+        assert config.initial_backoff == 2.0
+        assert config.max_backoff == 60.0
+
+    def test_config_defaults_match_old_constants(self) -> None:
+        config = DatabentoConfig(api_key="test_key")
+        assert config.max_retries == 3
+        assert config.initial_backoff == 1.0
+        assert config.max_backoff == 30.0
+
+    @patch("fin3.providers.databento.DatabentoProvider.__init__", return_value=None)
+    def test_retry_on_rate_limit_with_backoff(
+        self, mock_init: MagicMock, mock_store_df: pd.DataFrame
+    ) -> None:
+        provider = DatabentoProvider.__new__(DatabentoProvider)
+        provider._client = MagicMock()
+        provider._dataset = "XNAS.ITCH"
+        provider._max_retries = 3
+        provider._initial_backoff = 0.01
+        provider._max_backoff = 1.0
+
+        mock_store = MagicMock()
+        mock_store.to_df.return_value = mock_store_df
+        provider._client.timeseries.get_range.side_effect = [
+            Exception("429 rate limit exceeded"),
+            mock_store,
+        ]
+
+        with patch("time.sleep") as mock_sleep:
+            result = provider.fetch(
+                symbol="AAPL",
+                start=datetime(2024, 1, 2, 9, 30, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 2, 9, 31, tzinfo=timezone.utc),
+                resolution=Resolution.ONE_MINUTE,
+            )
+
+        assert len(result) == 2
+        mock_sleep.assert_called_once_with(0.01)
+
+    @patch("fin3.providers.databento.DatabentoProvider.__init__", return_value=None)
+    def test_raises_after_exhausting_retries(
+        self, mock_init: MagicMock
+    ) -> None:
+        provider = DatabentoProvider.__new__(DatabentoProvider)
+        provider._client = MagicMock()
+        provider._dataset = "XNAS.ITCH"
+        provider._max_retries = 2
+        provider._initial_backoff = 0.01
+        provider._max_backoff = 1.0
+
+        provider._client.timeseries.get_range.side_effect = Exception(
+            "429 rate limit exceeded"
+        )
+
+        with patch("time.sleep"):
+            with pytest.raises(ProviderRateLimitError):
+                provider.fetch(
+                    symbol="AAPL",
+                    start=datetime(2024, 1, 2, 9, 30, tzinfo=timezone.utc),
+                    end=datetime(2024, 1, 2, 9, 31, tzinfo=timezone.utc),
+                    resolution=Resolution.ONE_MINUTE,
+                )

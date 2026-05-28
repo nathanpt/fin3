@@ -288,3 +288,21 @@ class ArcticStorage:
             return int(total.bytes_compressed)
         except Exception:
             return 0
+
+    def get_segment_count(self, library: str, symbol: str) -> int:
+        """Return the number of data segments for a symbol.
+
+        Returns 0 if the symbol does not exist.
+        """
+        import arcticdb as _adb
+
+        lib = self._get_or_create_library(library)
+        try:
+            sizes = lib.admin_tools().get_sizes_for_symbol(symbol)
+            # ArcticDB returns key types with count=0 for nonexistent symbols
+            data_key = _adb.KeyType.TABLE_DATA
+            if data_key in sizes and sizes[data_key].count > 0:
+                return len(sizes)
+            return 0
+        except Exception:
+            return 0
