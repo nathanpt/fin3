@@ -289,6 +289,11 @@ class MarketDataFetcher:
             asset_type=asset_type,
         )
 
+        # Aggregate if provider returns finer-grained bars than requested
+        # (e.g. 1m bars for a 5m/15m resolution, or 1h bars for 4h).
+        if not raw_df.empty and len(raw_df) > 1:
+            raw_df = _aggregate_bars(raw_df, resolution)
+
         validate_raw_provider_data(raw_df, resolution)
 
         is_new = not self._storage.has_symbol(lib_name, symbol)
@@ -379,6 +384,34 @@ def _reindex(df: pd.DataFrame, grid: pd.DatetimeIndex) -> pd.DataFrame:
     return reindexed
 
 
+def _aggregate_bars(df: pd.DataFrame, resolution: Resolution) -> pd.DataFrame:
+    """Aggregate finer-grained bars up to the target resolution.
+
+    Some providers always return a fixed schema (e.g. 1m bars) regardless of
+    the requested resolution. This detects when raw data is finer than target
+    and resamples using proper OHLCV aggregation:
+      open=first, high=max, low=min, close=last, volume=sum
+    """
+    target_freq = resolution.timedelta_alias
+    raw_spacing = pd.Series(df.index).diff().dropna().median()
+    target_td = pd.Timedelta(target_freq)
+
+    # Only aggregate if raw data is meaningfully finer than target
+    if pd.Timedelta(raw_spacing) >= target_td:
+        return df
+
+    resampled = df.resample(target_freq).agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    })
+    # Drop any bins that are all-NaN (gaps between sessions)
+    resampled = resampled.dropna(subset=["close"])
+    return resampled
+
+
 def _snap_to_grid(df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resolution) -> pd.DataFrame:
     """Snap provider timestamps to the calendar grid.
 
@@ -386,6 +419,9 @@ def _snap_to_grid(df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resoluti
     - Daily: midnight UTC -> market-open (e.g. 14:30 UTC for NYSE)
     - Intraday: whole-hour UTC -> market-open offsets (e.g. 14:30, 15:30, ...)
     """
+    if grid.empty or df.empty:
+        return df.copy()
+
     df = df.copy()
 
     if resolution == Resolution.ONE_DAY:
@@ -400,8 +436,12 @@ def _snap_to_grid(df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resoluti
         return df
 
     # Intraday: nearest-neighbor alignment with tolerance
-    median_spacing = pd.Series(grid).diff().dropna().median()
-    tolerance = median_spacing / 2
+    if len(grid) < 2:
+        # Single grid point: snap everything within tolerance = resolution
+        tolerance = pd.Timedelta(resolution.timedelta_alias) / 2
+    else:
+        median_spacing = pd.Series(grid).diff().dropna().median()
+        tolerance = median_spacing / 2
 
     grid_idx = grid.get_indexer(df.index, method="nearest", tolerance=tolerance)
     new_index = []

@@ -245,3 +245,51 @@ class TestEmptyDataGuard:
         assert isinstance(result, pd.DataFrame)
         # Should NOT have stored anything for this symbol
         assert not lmdb_storage.has_symbol("crypto-tick-1h-databento", "FAKESYMBOL")
+
+    def test_empty_data_existing_symbol_still_updated(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Provider returns empty data for an existing symbol — null grid stored."""
+        fetcher = _make_fetcher(lmdb_storage)
+
+        # Phase 1: write real data for day 1
+        real_data = make_ohlcv("2024-01-01 00:00", periods=24, freq="1h")
+        empty_df = pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+            index=pd.DatetimeIndex([], tz="UTC"),
+        )
+        mock_provider = MagicMock()
+        # bootstrap discovery fetch + gap fill
+        mock_provider.fetch.side_effect = [real_data, real_data]
+        mock_provider.get_instrument_bounds = MagicMock(
+            return_value={"ipo_date": None, "delist_date": None}
+        )
+        fetcher._providers._providers = {"databento": mock_provider}
+
+        fetcher.get_data(
+            asset_type=AssetType.CRYPTO,
+            provider="databento",
+            resolution=Resolution.ONE_HOUR,
+            symbols=["BTC-USD"],
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+        )
+
+        assert lmdb_storage.has_symbol("crypto-tick-1h-databento", "BTC-USD")
+
+        # Phase 2: request day 2 — bootstrap returns cached metadata (no fetch),
+        # gap fill returns empty data, but symbol already exists so null grid is stored
+        mock_provider.fetch.side_effect = [empty_df]
+
+        result = fetcher.get_data(
+            asset_type=AssetType.CRYPTO,
+            provider="databento",
+            resolution=Resolution.ONE_HOUR,
+            symbols=["BTC-USD"],
+            start=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 2, 23, 0, tzinfo=timezone.utc),
+        )
+
+        assert isinstance(result, pd.DataFrame)
+        # Symbol should still exist in storage (not removed)
+        assert lmdb_storage.has_symbol("crypto-tick-1h-databento", "BTC-USD")
