@@ -18,7 +18,7 @@ import structlog
 
 from fin3.calendar.exchange import ExchangeCalendarStrategy
 from fin3.config.settings import ClientConfig
-from fin3.schemas import OHLCV_COLUMNS, Resolution
+from fin3.schemas import Resolution
 from fin3.storage.arctic import ArcticStorage
 from fin3.utils.logging import configure_logging
 from fin3.utils.integrity import check_integrity

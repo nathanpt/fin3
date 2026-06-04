@@ -290,19 +290,54 @@ class ArcticStorage:
             return 0
 
     def get_segment_count(self, library: str, symbol: str) -> int:
-        """Return the number of data segments for a symbol.
+        """Return the number of table-data segments for a symbol.
 
-        Returns 0 if the symbol does not exist.
+        Returns 0 if the symbol does not exist or segment metadata is unavailable.
         """
         import arcticdb as _adb
 
         lib = self._get_or_create_library(library)
         try:
             sizes = lib.admin_tools().get_sizes_for_symbol(symbol)
-            # ArcticDB returns key types with count=0 for nonexistent symbols
-            data_key = _adb.KeyType.TABLE_DATA
-            if data_key in sizes and sizes[data_key].count > 0:
-                return len(sizes)
-            return 0
+            table_data = sizes.get(_adb.KeyType.TABLE_DATA)
+            if table_data is None:
+                return 0
+            return int(table_data.count)
         except Exception:
             return 0
+
+    def is_symbol_fragmented(self, library: str, symbol: str) -> bool:
+        """Return whether ArcticDB considers a symbol fragmented.
+
+        Returns False if the symbol does not exist or fragmentation metadata is unavailable.
+        """
+        lib = self._get_or_create_library(library)
+        try:
+            return bool(lib.is_symbol_fragmented(symbol))
+        except Exception:
+            return False
+
+    def defragment_symbol(
+        self,
+        library: str,
+        symbol: str,
+        *,
+        prune_previous_versions: bool = True,
+        segment_size: int | None = None,
+    ) -> None:
+        """Compact data segments for a single symbol.
+
+        No-ops when ArcticDB reports that the symbol has nothing to compact.
+        """
+        if not self.is_symbol_fragmented(library, symbol):
+            return
+
+        lib = self._get_or_create_library(library)
+        try:
+            lib.defragment_symbol_data(
+                symbol,
+                segment_size=segment_size,
+                prune_previous_versions=prune_previous_versions,
+            )
+        except Exception as exc:
+            raise StorageError(f"Failed to defragment {library}/{symbol}") from exc

@@ -16,7 +16,7 @@ from fin3.core import MarketDataFetcher
 from fin3.schemas import AssetType, Resolution
 from fin3.storage.arctic import ArcticStorage
 
-import fin3.providers.databento  # register provider
+import fin3.providers.databento  # noqa: F401  # register provider
 
 
 def main() -> None:

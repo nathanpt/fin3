@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Literal
 
 import structlog
 
@@ -16,15 +17,24 @@ from fin3.storage.arctic import ArcticStorage
 
 logger = structlog.get_logger(__name__)
 
+DefragStatus = Literal["ok", "would_defrag", "defragmented", "failed", "missing"]
+
 
 @dataclass
 class SymbolDefragResult:
     """Per-symbol defragmentation outcome."""
 
     symbol: str
+    status: DefragStatus
     was_fragmented: bool
     segments_before: int
     segments_after: int
+    error: str | None = None
+
+    @property
+    def changed(self) -> bool:
+        """Return True when the symbol was actually compacted."""
+        return self.status == "defragmented"
 
 
 @dataclass
@@ -37,11 +47,23 @@ class DefragReport:
 
     @property
     def defragmented_count(self) -> int:
-        return sum(1 for r in self.results if r.was_fragmented)
+        return sum(1 for r in self.results if r.status == "defragmented")
+
+    @property
+    def would_defrag_count(self) -> int:
+        return sum(1 for r in self.results if r.status == "would_defrag")
+
+    @property
+    def failed_count(self) -> int:
+        return sum(1 for r in self.results if r.status == "failed")
 
     @property
     def skipped_count(self) -> int:
-        return sum(1 for r in self.results if not r.was_fragmented)
+        return sum(1 for r in self.results if r.status == "ok")
+
+    @property
+    def missing_count(self) -> int:
+        return sum(1 for r in self.results if r.status == "missing")
 
 
 def get_fragmentation_info(
@@ -63,7 +85,7 @@ def get_fragmentation_info(
     Returns
     -------
     DefragReport
-        Report with ``was_fragmented`` populated per symbol.
+        Report with per-symbol fragmentation status.
     """
     if symbols is None:
         symbols = storage.list_symbols(library)
@@ -71,15 +93,12 @@ def get_fragmentation_info(
     results: list[SymbolDefragResult] = []
     for symbol in symbols:
         seg_count = storage.get_segment_count(library, symbol)
-        # Access the underlying ArcticDB library to check fragmentation
-        lib = storage._get_or_create_library(library)
-        try:
-            fragmented = lib.is_symbol_fragmented(symbol)
-        except Exception:
-            fragmented = False
+        fragmented = storage.is_symbol_fragmented(library, symbol)
+        status = _status_for_fragmentation(fragmented, dry_run=True)
         results.append(
             SymbolDefragResult(
                 symbol=symbol,
+                status=status,
                 was_fragmented=fragmented,
                 segments_before=seg_count,
                 segments_after=seg_count,
@@ -118,54 +137,58 @@ def defragment_library(
     Returns
     -------
     DefragReport
-        Per-symbol results with before/after segment counts.
+        Per-symbol results with before/after segment counts and status.
     """
     start = time.monotonic()
 
     if symbols is None:
         symbols = storage.list_symbols(library)
 
-    lib = storage._get_or_create_library(library)
     results: list[SymbolDefragResult] = []
 
     for symbol in symbols:
         seg_before = storage.get_segment_count(library, symbol)
-        was_fragmented = False
-
-        try:
-            was_fragmented = lib.is_symbol_fragmented(symbol)
-        except Exception:
-            pass
+        was_fragmented = storage.is_symbol_fragmented(library, symbol)
+        status = _status_for_fragmentation(was_fragmented, dry_run=dry_run)
+        error: str | None = None
+        seg_after = seg_before
 
         if was_fragmented and not dry_run:
             try:
-                lib.defragment_symbol_data(
+                storage.defragment_symbol(
+                    library,
                     symbol,
                     segment_size=segment_size,
                     prune_previous_versions=prune_previous_versions,
                 )
+                status = "defragmented"
+                seg_after = storage.get_segment_count(library, symbol)
                 logger.info(
                     "defrag.symbol_compacted",
                     library=library,
                     symbol=symbol,
                     segments_before=seg_before,
+                    segments_after=seg_after,
                 )
             except Exception as exc:
+                status = "failed"
+                error = str(exc)
+                seg_after = storage.get_segment_count(library, symbol)
                 logger.warning(
                     "defrag.symbol_failed",
                     library=library,
                     symbol=symbol,
-                    error=str(exc),
+                    error=error,
                 )
-
-        seg_after = storage.get_segment_count(library, symbol) if was_fragmented and not dry_run else seg_before
 
         results.append(
             SymbolDefragResult(
                 symbol=symbol,
+                status=status,
                 was_fragmented=was_fragmented,
                 segments_before=seg_before,
                 segments_after=seg_after,
+                error=error,
             )
         )
 
@@ -180,8 +203,18 @@ def defragment_library(
         "defrag.complete",
         library=library,
         defragmented=report.defragmented_count,
+        would_defrag=report.would_defrag_count,
         skipped=report.skipped_count,
+        failed=report.failed_count,
         elapsed_seconds=report.elapsed_seconds,
     )
 
     return report
+
+
+def _status_for_fragmentation(fragmented: bool, *, dry_run: bool) -> DefragStatus:
+    if not fragmented:
+        return "ok"
+    if dry_run:
+        return "would_defrag"
+    return "defragmented"

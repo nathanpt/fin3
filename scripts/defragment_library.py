@@ -14,7 +14,35 @@ import argparse
 
 from fin3.config.settings import ClientConfig
 from fin3.storage.arctic import ArcticStorage
-from fin3.storage.defrag import defragment_library
+from fin3.storage.defrag import DefragReport, defragment_library
+
+
+def format_report(report: DefragReport) -> str:
+    """Format a defragmentation report for terminal output."""
+    lines = [
+        f"Results for {report.library}:",
+        f"  Defragmented: {report.defragmented_count}",
+        f"  Would defrag: {report.would_defrag_count}",
+        f"  Skipped:      {report.skipped_count}",
+        f"  Failed:       {report.failed_count}",
+        f"  Elapsed:      {report.elapsed_seconds:.2f}s",
+    ]
+
+    if report.results:
+        lines.append("")
+        lines.append("Per-symbol detail:")
+        for result in report.results:
+            detail = (
+                f"  {result.symbol:10s}  "
+                f"segments_before={result.segments_before:<4d}  "
+                f"segments_after={result.segments_after:<4d}  "
+                f"status={result.status}"
+            )
+            if result.error is not None:
+                detail = f"{detail}  error={result.error}"
+            lines.append(detail)
+
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -54,21 +82,11 @@ def main() -> None:
         segment_size=args.segment_size,
     )
 
-    print(f"\nResults for {args.library}:")
-    print(f"  Defragmented: {report.defragmented_count}")
-    print(f"  Skipped:      {report.skipped_count}")
-    print(f"  Elapsed:      {report.elapsed_seconds:.2f}s")
+    print()
+    print(format_report(report))
 
-    if report.results:
-        print("\nPer-symbol detail:")
-        for r in report.results:
-            status = "COMPACTED" if r.was_fragmented and not args.dry_run else "OK"
-            if args.dry_run and r.was_fragmented:
-                status = "NEEDS DEFRAG"
-            print(
-                f"  {r.symbol:10s}  segments={r.segments_before:4d}  "
-                f"status={status}"
-            )
+    if report.failed_count > 0:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

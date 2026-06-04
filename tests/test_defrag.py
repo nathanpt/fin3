@@ -4,8 +4,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
+from fin3.exceptions import StorageError
 from fin3.storage.arctic import ArcticStorage
-from fin3.storage.defrag import defragment_library, get_fragmentation_info
+from fin3.storage.defrag import (
+    DefragReport,
+    SymbolDefragResult,
+    defragment_library,
+    get_fragmentation_info,
+)
+from scripts.defragment_library import format_report
 from tests.conftest import make_ohlcv
 
 
@@ -18,6 +27,19 @@ class TestGetSegmentCount:
         storage.write("test-lib", "AAPL", df)
         count = storage.get_segment_count("test-lib", "AAPL")
         assert count >= 1
+
+    def test_is_symbol_fragmented_returns_false_for_missing_symbol(
+        self, storage: ArcticStorage
+    ) -> None:
+        assert storage.is_symbol_fragmented("test-lib", "NOEXIST") is False
+
+    def test_defragment_symbol_returns_without_error_for_existing_symbol(
+        self, storage: ArcticStorage
+    ) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+
+        storage.defragment_symbol("test-lib", "AAPL", prune_previous_versions=True)
 
 
 class TestGetFragmentationInfo:
@@ -34,6 +56,7 @@ class TestGetFragmentationInfo:
         assert len(report.results) == 1
         result = report.results[0]
         assert result.symbol == "AAPL"
+        assert result.status in {"ok", "would_defrag"}
         assert result.segments_before >= 1
 
     def test_specific_symbols(self, storage: ArcticStorage) -> None:
@@ -57,6 +80,53 @@ class TestDefragmentLibrary:
         assert seg_before == seg_after
         assert report.defragmented_count == 0
 
+    def test_dry_run_reports_would_defrag_for_fragmented_symbol(
+        self, storage: ArcticStorage, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+        monkeypatch.setattr(
+            storage,
+            "is_symbol_fragmented",
+            lambda library, symbol: True,
+        )
+
+        called = False
+
+        def fake_defrag(*args: object, **kwargs: object) -> None:
+            nonlocal called
+            called = True
+
+        monkeypatch.setattr(storage, "defragment_symbol", fake_defrag)
+
+        report = defragment_library(storage, "test-lib", dry_run=True)
+
+        assert called is False
+        assert report.would_defrag_count == 1
+        assert report.results[0].status == "would_defrag"
+
+    def test_defrag_failure_is_reported(
+        self, storage: ArcticStorage, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+        monkeypatch.setattr(
+            storage,
+            "is_symbol_fragmented",
+            lambda library, symbol: True,
+        )
+
+        def boom(*args: object, **kwargs: object) -> None:
+            raise StorageError("boom")
+
+        monkeypatch.setattr(storage, "defragment_symbol", boom)
+
+        report = defragment_library(storage, "test-lib")
+
+        assert report.failed_count == 1
+        assert report.results[0].status == "failed"
+        assert "boom" in (report.results[0].error or "")
+
     def test_defragment_after_many_updates(self, storage: ArcticStorage) -> None:
         df = make_ohlcv("2024-01-02 09:30", periods=500, freq="1min")
         storage.write("test-lib", "AAPL", df)
@@ -69,7 +139,9 @@ class TestDefragmentLibrary:
                 f"2024-01-02 09:{30 + i:02d}", periods=1, freq="1min", base_price=200.0
             )
             storage.update(
-                "test-lib", "AAPL", update_df,
+                "test-lib",
+                "AAPL",
+                update_df,
                 date_range=(start_ts, end_ts),
             )
 
@@ -107,3 +179,35 @@ class TestDefragmentLibrary:
         report = defragment_library(storage, "test-lib")
         # A single write is unlikely to be fragmented
         assert report.skipped_count == 1
+
+
+class TestFormatReport:
+    def test_format_report_includes_status_counts(self) -> None:
+        report = DefragReport(
+            library="test-lib",
+            results=[
+                SymbolDefragResult(
+                    symbol="AAPL",
+                    status="would_defrag",
+                    was_fragmented=True,
+                    segments_before=3,
+                    segments_after=3,
+                ),
+                SymbolDefragResult(
+                    symbol="TSLA",
+                    status="failed",
+                    was_fragmented=True,
+                    segments_before=4,
+                    segments_after=4,
+                    error="boom",
+                ),
+            ],
+            elapsed_seconds=0.1,
+        )
+
+        output = format_report(report)
+
+        assert "Would defrag: 1" in output
+        assert "Failed:       1" in output
+        assert "status=would_defrag" in output
+        assert "error=boom" in output

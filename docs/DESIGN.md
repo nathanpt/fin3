@@ -655,7 +655,7 @@ This is O(chunks) â€” O(trading_days) for exchange assets, O(hours) for crypto â
 - Use ArcticDB's server-side `QueryBuilder.date_range()` to minimize data materialization during reads where possible.
 
 ### 8.3 Maintenance
-- **Defragmentation**: Frequent small `update` or `append` calls create many small data segments, degrading read performance. Run `lib.defragment_symbol_data(symbol)` periodically or after bulk gap-filling operations.
+- **Defragmentation**: Frequent small `update` or `append` calls create many small data segments, degrading read performance. Use `fin3.storage.defrag.get_fragmentation_info()` for dry-run inspection and `fin3.storage.defrag.defragment_library()` or `MarketDataFetcher.defragment()` to compact symbols. The maintenance script `scripts/defragment_library.py` exposes the same workflow for manual or scheduled runs and reports per-symbol statuses (`ok`, `would_defrag`, `defragmented`, `failed`). Run defragmentation after bulk gap-filling operations or during quiet maintenance windows; concurrent write protection is handled separately in Phase 2.
 - **Version pruning**: `prune_previous_versions=True` on all writes. Old versions are not kept unless a snapshot exists.
 
 ## 9. Naming & Organization Conventions

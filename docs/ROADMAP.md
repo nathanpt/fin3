@@ -45,14 +45,16 @@ while producing useful infrastructure. Items marked with checkmarks are done.
     assertions and integration tests before enabling.
   - **Paired with**: Defragmentation utilities (next item).
 
-- **Defragmentation maintenance utilities** — Each `update(date_range=...)`
+- ~~**Defragmentation maintenance utilities** — Each `update(date_range=...)`
   creates a new data segment. Over time, many small segments degrade read
   performance. ArcticDB provides `lib.defragment_symbol_data(symbol)` to merge
   segments. Expose as a utility function or CLI command, and optionally run
-  automatically after bulk gap-filling operations.
-  - **Trigger**: Read performance degrades after frequent small `update` or
-    `append` operations, or as a scheduled maintenance task.
-  - **Paired with**: Three-way write routing (previous item).
+  automatically after bulk gap-filling operations.~~
+  - **Completed**: Implemented via `ArcticStorage` helpers,
+    `fin3.storage.defrag`, `MarketDataFetcher.defragment()`,
+    `get_data(..., defrag=True)`, and `scripts/defragment_library.py`, with
+    dry-run reporting, explicit per-symbol statuses, failure reporting, and
+    documentation in `docs/USAGE.md` / `docs/DESIGN.md`.
 
 - **Concurrent access protection** — The current design assumes single-process
   execution. If two processes call `get_data("AAPL", ...)` concurrently, both
