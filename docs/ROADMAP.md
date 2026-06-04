@@ -67,6 +67,23 @@ while producing useful infrastructure. Items marked with checkmarks are done.
     symbol; PID-scoped locking with timeout and deadlock detection; ArcticDB
     staged writes (`write(staged=True)` + `finalize_staged_data()`).
 
+- **Crypto market data ingestion** — Add a reliable path to download and store
+  cryptocurrency OHLCV/ticker data, starting with Bitcoin (e.g. `BTC-USD` or
+  `BTCUSDT`). This should work with the existing `AssetType.CRYPTO` continuous
+  24/7 calendar and store into provider-specific ArcticDB libraries such as
+  `crypto-1m-binance`.
+  - **Goal**: Make `get_data(asset_type=AssetType.CRYPTO, ...)` work end-to-end
+    for at least Bitcoin, with tests proving 24/7 gap detection, provider fetch,
+    validation, storage, and retrieval.
+  - **Potential providers**: Binance first because it is a natural fit for crypto
+    OHLCV and avoids forcing Databento equities assumptions onto crypto data.
+  - **Acceptance criteria**: Download BTC data for common resolutions (`1m`,
+    `1h`, `1d`), normalize to fin3 OHLCV schema, store in ArcticDB/MinIO, pass
+    unit/integration tests, and document example usage.
+  - **Risks**: Symbol conventions differ by provider (`BTC-USD` vs `BTCUSDT`),
+    crypto trades 24/7, exchanges have outages/maintenance windows, and some APIs
+    impose strict pagination/rate limits.
+
 - **Resource monitoring** — Disk, memory, network tracking for the pipeline.
 
 ---
