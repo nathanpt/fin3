@@ -2,7 +2,8 @@
 
 Provides:
 - ``RSSSampler`` — background thread sampling process RSS via psutil.
-- ``compute_disk_delta`` — before/after disk size diff per symbol.
+- ``compute_symbol_sizes`` — total size for a subset of symbols (per-scan).
+- ``compute_library_size`` — total size of an entire library (one scan).
 - ``ByteCounter`` — accumulates payload bytes from provider responses.
 """
 
@@ -130,22 +131,25 @@ class ByteCounter:
             self._fetch_count = 0
 
 
-def compute_disk_delta(
+def compute_symbol_sizes(
     storage: ArcticStorage,
     library: str,
     symbols: list[str],
-) -> tuple[int, int]:
-    """Return ``(per_symbol_total_bytes, library_total_bytes)``.
+) -> int:
+    """Return the total compressed size for a subset of *symbols* in *library*.
 
-    The per-symbol total sums sizes for just the requested symbols; the
-    library total sums across **all** symbols in the library.
+    Uses one ``get_sizes_for_symbol`` call per requested symbol. Cheap when
+    *symbols* is small (the common case for a single ``get_data`` call).
     """
-    symbol_total = 0
-    for sym in symbols:
-        symbol_total += storage.get_symbol_size(library, sym)
+    return sum(storage.get_symbol_size(library, sym) for sym in symbols)
 
-    library_total = 0
-    for sym in storage.list_symbols(library):
-        library_total += storage.get_symbol_size(library, sym)
 
-    return symbol_total, library_total
+def compute_library_size(storage: ArcticStorage, library: str) -> int:
+    """Return the total compressed size of the entire *library*.
+
+    Uses a single ``get_sizes()`` scan — one backend round-trip instead of
+    one per symbol — and avoids double-counting library-global key types.
+    Use this for the library-total display; use ``compute_symbol_sizes`` for
+    per-symbol deltas.
+    """
+    return storage.get_library_size(library)

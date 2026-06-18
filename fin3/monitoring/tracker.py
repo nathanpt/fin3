@@ -30,7 +30,8 @@ from fin3.monitoring.collector import (
     ByteCounter,
     RSSSampler,
     SampledMetrics,
-    compute_disk_delta,
+    compute_library_size,
+    compute_symbol_sizes,
 )
 from fin3.monitoring.render import render_summary
 from fin3.monitoring.tmux import create_monitor_pane, is_in_tmux, kill_pane
@@ -91,6 +92,13 @@ class ResourceTracker:
         self._is_tty: bool = sys.stderr.isatty()
         self._console = Console(stderr=True)
 
+        # Disk metrics: affected-symbol sizes are measured on enter and exit
+        # (cheap, a few symbols). The whole-library total is measured once on
+        # exit via a single get_sizes() scan (one round-trip, not N).
+        self._disk_before: int = 0
+        self._disk_after: int = 0
+        self._library_total: int = 0
+
     def set_phase(self, phase: str) -> None:
         """Update the current operation phase for live display."""
         self._phase = phase
@@ -102,8 +110,10 @@ class ResourceTracker:
     def __enter__(self) -> ResourceTracker:
         self._start_time = time.monotonic()
 
-        # Baseline disk sizes
-        self._disk_before, self._library_total_before = compute_disk_delta(
+        # Baseline disk sizes for the affected symbols only (cheap).
+        # The whole-library total is deferred to exit so startup isn't
+        # blocked by scanning every symbol in the library.
+        self._disk_before = compute_symbol_sizes(
             self._storage, self._library, self._symbols,
         )
 
@@ -130,10 +140,12 @@ class ResourceTracker:
         # Restore original provider fetch
         self._restore_provider()
 
-        # Final disk sizes
-        self._disk_after, self._library_total_after = compute_disk_delta(
+        # Final disk sizes: affected symbols (delta) + one whole-library
+        # scan for the total (single get_sizes() call, not per-symbol).
+        self._disk_after = compute_symbol_sizes(
             self._storage, self._library, self._symbols,
         )
+        self._library_total = compute_library_size(self._storage, self._library)
 
         # Stop writer thread
         self._stop_writer.set()
@@ -226,7 +238,7 @@ class ResourceTracker:
             "fetch_count": 0,
             "disk_before_bytes": self._disk_before,
             "disk_after_bytes": self._disk_before,
-            "library_total_bytes": self._library_total_before,
+            "library_total_bytes": self._library_total,
             "elapsed": 0.0,
             "phase": "initialising...",
             "symbols": self._symbols,
@@ -257,7 +269,7 @@ class ResourceTracker:
             "fetch_count": self._byte_counter.fetch_count,
             "disk_before_bytes": self._disk_before,
             "disk_after_bytes": self._disk_before,
-            "library_total_bytes": self._library_total_before,
+            "library_total_bytes": self._library_total,
             "elapsed": elapsed,
             "phase": self._phase,
             "symbols": self._symbols,
@@ -310,5 +322,5 @@ class ResourceTracker:
             fetch_count=self._byte_counter.fetch_count,
             disk_before_bytes=self._disk_before,
             disk_after_bytes=self._disk_after,
-            library_total_bytes=self._library_total_after,
+            library_total_bytes=self._library_total,
         )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -16,7 +16,8 @@ from fin3.monitoring.collector import (
     ByteCounter,
     RSSSampler,
     SampledMetrics,
-    compute_disk_delta,
+    compute_library_size,
+    compute_symbol_sizes,
 )
 from fin3.monitoring.render import (
     _fmt_bytes,
@@ -107,24 +108,66 @@ class TestSampledMetrics:
         assert m.disk_delta_bytes == 500
 
 
-class TestComputeDiskDelta:
-    def test_returns_symbol_and_library_totals(self, storage) -> None:
+class TestComputeSymbolSizes:
+    def test_returns_symbol_total(self, storage) -> None:
         df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
         storage.write("test-lib", "AAPL", df)
         storage.write("test-lib", "MSFT", df)
 
-        symbol_total, library_total = compute_disk_delta(
-            storage, "test-lib", ["AAPL"],
-        )
-        assert symbol_total > 0
+        total = compute_symbol_sizes(storage, "test-lib", ["AAPL"])
+        assert total > 0
+
+    def test_only_counts_requested_symbols(self, storage) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+        storage.write("test-lib", "MSFT", df)
+
+        one = compute_symbol_sizes(storage, "test-lib", ["AAPL"])
+        both = compute_symbol_sizes(storage, "test-lib", ["AAPL", "MSFT"])
+        assert both > one
+
+    def test_empty_symbol_list(self, storage) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+        assert compute_symbol_sizes(storage, "test-lib", []) == 0
+
+    def test_missing_symbol_counts_zero(self, storage) -> None:
+        # get_symbol_size returns 0 for missing symbols
+        total = compute_symbol_sizes(storage, "test-lib", ["NOPE"])
+        assert total == 0
+
+
+class TestComputeLibrarySize:
+    def test_returns_library_total(self, storage) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+        storage.write("test-lib", "MSFT", df)
+
+        total = compute_library_size(storage, "test-lib")
+        assert total > 0
+
+    def test_total_gte_single_symbol(self, storage) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+        storage.write("test-lib", "MSFT", df)
+
+        library_total = compute_library_size(storage, "test-lib")
+        symbol_total = compute_symbol_sizes(storage, "test-lib", ["AAPL"])
         assert library_total >= symbol_total
 
     def test_empty_library(self, storage) -> None:
-        symbol_total, library_total = compute_disk_delta(
-            storage, "empty-lib", ["AAPL"],
-        )
-        assert symbol_total == 0
-        assert library_total == 0
+        assert compute_library_size(storage, "empty-lib") == 0
+
+
+class TestGetLibrarySize:
+    def test_storage_get_library_size(self, storage) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+        storage.write("test-lib", "MSFT", df)
+        assert storage.get_library_size("test-lib") > 0
+
+    def test_empty_library_returns_zero(self, storage) -> None:
+        assert storage.get_library_size("empty-lib") == 0
 
 
 # ---------------------------------------------------------------------------

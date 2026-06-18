@@ -306,6 +306,26 @@ class ArcticStorage:
         except Exception:
             return 0
 
+    def get_library_size(self, library: str) -> int:
+        """Return the total compressed storage size in bytes for an entire library.
+
+        Uses a single ``admin_tools().get_sizes()`` scan rather than summing
+        per-symbol sizes, which is dramatically cheaper over network backends
+        (one round-trip vs N) and avoids double-counting library-global key
+        types such as ``VERSION_REF``.
+
+        Returns 0 if the library is empty or metadata is unavailable.
+        """
+        from arcticdb.version_store.admin_tools import sum_sizes
+
+        lib = self._get_or_create_library(library)
+        try:
+            sizes = lib.admin_tools().get_sizes()
+            total = sum_sizes(sizes.values())
+            return int(total.bytes_compressed)
+        except Exception:
+            return 0
+
     def is_symbol_fragmented(self, library: str, symbol: str) -> bool:
         """Return whether ArcticDB considers a symbol fragmented.
 
