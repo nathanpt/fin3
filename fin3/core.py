@@ -19,6 +19,7 @@ from fin3.storage.arctic import ArcticStorage
 from fin3.storage.defrag import DefragReport, defragment_library
 from fin3.utils.date_utils import detect_gaps, ensure_utc
 from fin3.utils.logging import configure_logging
+from fin3.monitoring.tracker import ResourceTracker
 from fin3.utils.validation import validate_raw_provider_data, validate_storage_artifact
 
 logger = structlog.get_logger(__name__)
@@ -67,29 +68,38 @@ class MarketDataFetcher:
         prov = self._providers.get(provider)
         strategy = asset_type.calendar_strategy
 
-        if max_cost is not None and hasattr(prov, "estimate_cost"):
-            self._check_cost(
-                lib_name, symbols, prov, strategy, asset_type, resolution,
-                start, end, max_cost,
-            )
+        with ResourceTracker(
+            self._storage, prov, lib_name, symbols, resolution,
+        ) as tracker:
+            if max_cost is not None and hasattr(prov, "estimate_cost"):
+                self._check_cost(
+                    lib_name, symbols, prov, strategy, asset_type, resolution,
+                    start, end, max_cost,
+                )
 
-        for symbol in symbols:
-            self._ensure_symbol(
-                lib_name, symbol, prov, strategy, asset_type, resolution, start, end
-            )
+            for symbol in symbols:
+                tracker.set_phase(f"fetching {symbol}...")
+                self._ensure_symbol(
+                    lib_name, symbol, prov, strategy, asset_type, resolution, start, end
+                )
 
-        if defrag:
-            self.defragment(asset_type, provider, resolution, symbols=symbols)
+            if defrag:
+                tracker.set_phase("defragmenting...")
+                self.defragment(asset_type, provider, resolution, symbols=symbols)
 
-        per_symbol: dict[str, pd.DataFrame] = {}
-        for symbol in symbols:
-            df = self._storage.read(lib_name, symbol, date_range=(start, end))
-            if df is not None:
-                per_symbol[symbol] = df
-            else:
-                per_symbol[symbol] = empty_ohlcv()
+            tracker.set_phase("reading from storage...")
+            per_symbol: dict[str, pd.DataFrame] = {}
+            for symbol in symbols:
+                df = self._storage.read(lib_name, symbol, date_range=(start, end))
+                if df is not None:
+                    per_symbol[symbol] = df
+                else:
+                    per_symbol[symbol] = empty_ohlcv()
 
-        return _align_symbols(per_symbol)
+            result = _align_symbols(per_symbol)
+            tracker.set_rows(len(result))
+
+        return result
 
     def inspect(
         self,

@@ -13,6 +13,7 @@ from fin3.config.settings import (
     MinioConfig,
 )
 from fin3.schemas import empty_ohlcv
+from fin3.schemas import Resolution
 from fin3.storage.arctic import ArcticStorage
 
 
@@ -66,3 +67,23 @@ def make_ohlcv(
 
 def make_empty_ohlcv() -> pd.DataFrame:
     return empty_ohlcv()
+
+
+@pytest.fixture
+def mock_provider():
+    """A mock DataProvider that returns synthetic OHLCV data."""
+    from unittest.mock import MagicMock
+
+    provider = MagicMock()
+
+    def mock_fetch(symbol, start, end, resolution, **kwargs):
+        return make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
+
+    provider.fetch = mock_fetch
+    return provider
+
+
+@pytest.fixture
+def metrics_file(tmp_path: Path) -> str:
+    """Path to a temp metrics file for tracker/display tests."""
+    return str(tmp_path / "test-metrics.json")

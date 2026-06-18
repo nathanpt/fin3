@@ -14,6 +14,7 @@ from fin3.exceptions import (
     StorageError,
 )
 from fin3.inspect import LibraryOverview, SymbolProfile, inspect_library
+from fin3.monitoring import ResourceReport, ResourceTracker
 from fin3.schemas import AssetType, Resolution
 from fin3.storage.defrag import DefragReport, SymbolDefragResult, defragment_library, get_fragmentation_info
 from fin3.utils.integrity import IntegrityIssue, IntegrityReport, check_integrity
@@ -31,6 +32,8 @@ __all__ = [
     "LibraryOverview",
     "MarketDataFetcher",
     "ProviderError",
+    "ResourceReport",
+    "ResourceTracker",
     "ProviderRateLimitError",
     "ProviderTimeoutError",
     "Resolution",

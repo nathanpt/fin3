@@ -243,6 +243,79 @@ every routine read unless fragmentation is known to be a problem. Run
 maintenance when no other ingestion process is writing to the same library.
 Concurrent access protection is a separate Phase 2 concern.
 
+## Resource Monitoring
+
+fin3 automatically tracks resource usage (memory, disk, network) during every
+`get_data()` call and prints a formatted summary panel on completion — no flags
+or configuration needed.
+
+### Inside tmux
+
+When running inside a tmux session, a live monitor pane opens on the right side
+of the window during the operation, showing real-time resource usage:
+
+```
+┌─ fin3 monitor ─────────────────────┐
+│ Symbols     AAPL, MSFT             │
+│ Resolution  1m                     │
+│ Duration    42.3s                  │
+│ Memory      842.0 MB peak          │
+│ Disk        +128.4 MB              │
+│ Net         512.0 MB (5 fetches)   │
+│ Phase       fetching MSFT...       │
+└────────────────────────────────────┘
+```
+
+The pane closes automatically when the operation finishes, and a final summary
+is printed to the main pane.
+
+### Outside tmux
+
+When not in tmux, a summary panel is printed to stderr after the operation
+completes:
+
+```
+╭─ fin3 resource summary ───────────────────────────────────────╮
+│  Symbols: AAPL, MSFT        Resolution: 1m   Duration: 42.3s  │
+│  Rows: 1,204,800                                              │
+│  Disk:   +128.4 MB  (1.2 GB total in equities-1m-databento)  │
+│  Memory: 842.0 MB peak RSS                                    │
+│  Net:    512.0 MB downloaded (5 fetches)                      │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+Piped/CI output: the summary goes to stderr so stdout remains clean for piping.
+
+### Programmatic Usage
+
+You can use `ResourceTracker` directly for custom operations:
+
+```python
+from fin3.monitoring import ResourceTracker
+
+with ResourceTracker(
+    storage=storage,
+    provider=provider,
+    library="equities-1m-databento",
+    symbols=["AAPL"],
+    resolution=Resolution.ONE_MINUTE,
+) as tracker:
+    tracker.set_phase("custom work")
+    # ... do work ...
+    tracker.set_rows(10000)
+# Summary panel printed automatically on exit
+```
+
+### What's Tracked
+
+| Metric | Source | Description |
+|--------|--------|-------------|
+| Memory | `psutil` RSS | Peak process RSS delta during the operation |
+| Disk | ArcticDB symbol sizes | Net size change for affected symbols + library total |
+| Network | `DataFrame.memory_usage()` | Payload bytes across all provider fetch calls |
+| Duration | `time.monotonic()` | Wall-clock time |
+| Rows | Result DataFrame | Total rows in the returned data |
+
 ## Reference
 
 ### AssetType

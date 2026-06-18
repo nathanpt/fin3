@@ -84,7 +84,14 @@ while producing useful infrastructure. Items marked with checkmarks are done.
     crypto trades 24/7, exchanges have outages/maintenance windows, and some APIs
     impose strict pagination/rate limits.
 
-- **Resource monitoring** — Disk, memory, network tracking for the pipeline.
+- ~~**Resource monitoring** — Disk, memory, network tracking for the pipeline.~~
+  - **Completed**: Implemented via `fin3/monitoring/` package with
+    `ResourceTracker` context manager, live tmux pane display (with
+    `rich` panels), application-level network byte counting via provider
+    fetch wrapping, RSS memory sampling via `psutil`, and disk delta
+    tracking via ArcticDB symbol sizes. Auto-enabled in
+    `MarketDataFetcher.get_data()` with tmux/TTY/non-TTY fallbacks.
+    Documented in `docs/USAGE.md`.
 
 ---
 
