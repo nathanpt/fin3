@@ -85,13 +85,16 @@ while producing useful infrastructure. Items marked with checkmarks are done.
     impose strict pagination/rate limits.
 
 - ~~**Resource monitoring** — Disk, memory, network tracking for the pipeline.~~
-  - **Completed**: Implemented via `fin3/monitoring/` package with
-    `ResourceTracker` context manager, live tmux pane display (with
-    `rich` panels), application-level network byte counting via provider
-    fetch wrapping, RSS memory sampling via `psutil`, and disk delta
-    tracking via ArcticDB symbol sizes. Auto-enabled in
-    `MarketDataFetcher.get_data()` with tmux/TTY/non-TTY fallbacks.
-    Documented in `docs/USAGE.md`.
+  - **Completed**: Implemented via `fin3/monitoring/` package with a
+    `ResourceTracker` context manager, auto-enabled in
+    `MarketDataFetcher.get_data()` (no flags needed). Environment-aware
+    display: a live tmux split pane, an inline `rich.live` info bar for
+    native terminals, or a stderr summary for piped/CI. Tracks RSS memory
+    (psutil), application-level network bytes (via provider `fetch`
+    wrapping), disk deltas + library total (one `get_sizes()` scan),
+    duration, and rows. Per-symbol phases surface cost-estimation and
+    fetch progress live. Implementation notes in
+    `docs/resource-monitoring-notes.md`; usage in `docs/USAGE.md`.
 
 ---
 
