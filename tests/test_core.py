@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from fin3.config.settings import ClientConfig, DatabentoConfig, MinioConfig
+from fin3.config.settings import ClientConfig, DatabentoConfig, LockConfig, MinioConfig
 from fin3.core import MarketDataFetcher
 from fin3.exceptions import CostLimitExceededError
 from fin3.metadata.asset_profile import MetadataStore
@@ -336,3 +336,48 @@ class TestEmptyDataGuard:
         assert isinstance(result, pd.DataFrame)
         # Symbol should still exist in storage (not removed)
         assert lmdb_storage.has_symbol("crypto-tick-1h-databento", "BTC-USD")
+
+
+class TestSymbolLocking:
+    """The check-then-act span in _ensure_symbol is guarded by a per-symbol lock."""
+
+    def test_ensure_symbol_acquires_lock_per_symbol(self, tmp_path) -> None:
+        """get_data acquires one lock per symbol; distinct symbols → distinct keys."""
+        storage = ArcticStorage.from_lmdb(
+            str(tmp_path / "lmdb"),
+            lock=LockConfig(enabled=True, lock_dir=str(tmp_path / "locks")),
+        )
+        fetcher = _make_fetcher(storage)
+
+        # Provider returns data covering the requested hourly range so a gap is
+        # detected and _ensure_symbol runs fully (gap detection → fetch → write).
+        mock_provider = MagicMock()
+        mock_provider.fetch.return_value = make_ohlcv(
+            "2024-01-01 00:00", periods=24, freq="1h"
+        )
+        mock_provider.get_instrument_bounds = MagicMock(
+            return_value={"ipo_date": None, "delist_date": None}
+        )
+        fetcher._providers._providers = {"databento": mock_provider}
+
+        # Wrap the real lock_symbol so calls are recorded yet still performed.
+        spy = MagicMock(wraps=storage.lock_symbol)
+        storage.lock_symbol = spy  # type: ignore[method-assign]
+
+        fetcher.get_data(
+            asset_type=AssetType.CRYPTO,
+            provider="databento",
+            resolution=Resolution.ONE_HOUR,
+            symbols=["BTC-USD", "ETH-USD"],
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+        )
+
+        lib_name = "crypto-tick-1h-databento"
+        # One acquisition per symbol, each keyed by its (library, symbol) pair.
+        assert spy.call_count == 2
+        spy.assert_any_call(lib_name, "BTC-USD")
+        spy.assert_any_call(lib_name, "ETH-USD")
+        # Sanity: the two recorded keys are distinct symbols.
+        called_symbols = {call.args[1] for call in spy.call_args_list}
+        assert called_symbols == {"BTC-USD", "ETH-USD"}

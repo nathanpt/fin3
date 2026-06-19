@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import warnings
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Any, ContextManager, Iterator, cast
 
 import arcticdb as adb
 import pandas as pd
 import structlog
 from arcticdb.version_store.admin_tools import sum_sizes
 
-from fin3.config.settings import MinioConfig
+from fin3.config.settings import LockConfig, MinioConfig
 from fin3.exceptions import StorageError
+from fin3.storage.locking import SymbolLock
 
 logger = structlog.get_logger(__name__)
 
@@ -52,7 +54,7 @@ class ArcticStorage:
     Inside each bucket a single ArcticDB library named ``main`` is used.
     """
 
-    def __init__(self, config: MinioConfig) -> None:
+    def __init__(self, config: MinioConfig, lock: LockConfig | None = None) -> None:
         self._config = config
         self._scheme = "s3s" if config.secure else "s3"
         self._host, _, self._port = config.endpoint.partition(":")
@@ -62,6 +64,13 @@ class ArcticStorage:
         # When bucket is set, all libraries live inside this single bucket
         # using the library name as the ArcticDB library name.
         self._single_bucket = config.bucket or ""
+        if lock is not None and lock.enabled:
+            self._lock: SymbolLock | None = SymbolLock(
+                lock_dir=lock.lock_dir, timeout_s=lock.timeout_s,
+                poll_interval_s=lock.poll_interval_s,
+            )
+        else:
+            self._lock = None
 
     def _build_uri(self, bucket: str) -> str:
         uri = (
@@ -89,8 +98,14 @@ class ArcticStorage:
         return arctic
 
     @classmethod
-    def from_lmdb(cls, path: str) -> ArcticStorage:
-        """Create an ArcticStorage backed by LMDB (for testing)."""
+    def from_lmdb(
+        cls, path: str, lock: LockConfig | None = None
+    ) -> ArcticStorage:
+        """Create an ArcticStorage backed by LMDB (for testing).
+
+        LMDB is single-process, so locking is off by default; pass *lock* to
+        enable it (e.g. for tests of the concurrent-access-protection path).
+        """
         storage = cls.__new__(cls)
         storage._config = MinioConfig(endpoint="lmdb", access_key="", secret_key="")
         storage._scheme = "lmdb"
@@ -101,7 +116,29 @@ class ArcticStorage:
         storage._is_lmdb = True
         arctic = adb.Arctic(f"lmdb://{path}")
         storage._arctic_cache["__lmdb__"] = arctic
+        if lock is not None and lock.enabled:
+            storage._lock = SymbolLock(
+                lock_dir=lock.lock_dir, timeout_s=lock.timeout_s,
+                poll_interval_s=lock.poll_interval_s,
+            )
+        else:
+            storage._lock = None
         return storage
+
+    def lock_symbol(self, library: str, symbol: str) -> ContextManager[None]:
+        """Return a context manager that acquires a per-(library, symbol) advisory lock.
+
+        Returns a nullcontext when locking is disabled, so callers can always
+        wrap their mutating region in ``with self.lock_symbol(...):`` regardless
+        of whether locking is configured.
+        """
+        if self._lock is None:
+            return contextlib.nullcontext()
+        # ``SymbolLock.acquire`` returns a ``_HeldLock`` (whose ``__enter__``
+        # yields the held lock object, not ``None``); callers only use it as a
+        # bare ``with`` block, so the broader ``ContextManager[None]`` view is
+        # the honest contract here.
+        return cast("ContextManager[None]", self._lock.acquire(library, symbol))
 
     @property
     def arctic(self) -> adb.Arctic:
@@ -288,8 +325,9 @@ class ArcticStorage:
     def delete_symbol(self, library: str, symbol: str) -> None:
         """Delete all versions of a symbol from the library."""
         lib = self._get_or_create_library(library)
-        lib.delete(symbol)
-        logger.info("storage.delete", library=library, symbol=symbol)
+        with self.lock_symbol(library, symbol):
+            lib.delete(symbol)
+            logger.info("storage.delete", library=library, symbol=symbol)
 
     def list_symbols(self, library: str) -> list[str]:
         lib = self._get_or_create_library(library)
@@ -373,15 +411,16 @@ class ArcticStorage:
 
         No-ops when ArcticDB reports that the symbol has nothing to compact.
         """
-        if not self.is_symbol_fragmented(library, symbol):
-            return
+        with self.lock_symbol(library, symbol):
+            if not self.is_symbol_fragmented(library, symbol):
+                return
 
-        lib = self._get_or_create_library(library)
-        try:
-            lib.defragment_symbol_data(
-                symbol,
-                segment_size=segment_size,
-                prune_previous_versions=prune_previous_versions,
-            )
-        except Exception as exc:
-            raise StorageError(f"Failed to defragment {library}/{symbol}") from exc
+            lib = self._get_or_create_library(library)
+            try:
+                lib.defragment_symbol_data(
+                    symbol,
+                    segment_size=segment_size,
+                    prune_previous_versions=prune_previous_versions,
+                )
+            except Exception as exc:
+                raise StorageError(f"Failed to defragment {library}/{symbol}") from exc

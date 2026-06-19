@@ -31,7 +31,7 @@ class MarketDataFetcher:
     def __init__(self, config: ClientConfig) -> None:
         configure_logging(level=config.log_level, format_=config.log_format)
         self._config = config
-        self._storage = ArcticStorage(config.minio)
+        self._storage = ArcticStorage(config.minio, lock=config.lock)
         self._providers = ProviderRegistry(config.providers)
         self._metadata = MetadataStore(self._storage)
 
@@ -282,27 +282,28 @@ class MarketDataFetcher:
         end: datetime,
     ) -> None:
         """Ensure *symbol* has full coverage for [start, end] in the library."""
-        gaps = self._symbol_gaps(
-            lib_name, symbol, provider, asset_type, resolution, start, end
-        )
-
-        if not gaps:
-            logger.info("core.full_coverage", symbol=symbol)
-            return
-
-        logger.info("core.gaps_found", symbol=symbol, gap_count=len(gaps))
-
-        for gap_start, gap_end in gaps:
-            self._fill_gap(
-                lib_name,
-                symbol,
-                provider,
-                strategy,
-                resolution,
-                gap_start,
-                gap_end,
-                asset_type=asset_type,
+        with self._storage.lock_symbol(lib_name, symbol):
+            gaps = self._symbol_gaps(
+                lib_name, symbol, provider, asset_type, resolution, start, end
             )
+
+            if not gaps:
+                logger.info("core.full_coverage", symbol=symbol)
+                return
+
+            logger.info("core.gaps_found", symbol=symbol, gap_count=len(gaps))
+
+            for gap_start, gap_end in gaps:
+                self._fill_gap(
+                    lib_name,
+                    symbol,
+                    provider,
+                    strategy,
+                    resolution,
+                    gap_start,
+                    gap_end,
+                    asset_type=asset_type,
+                )
 
     def _fill_gap(
         self,

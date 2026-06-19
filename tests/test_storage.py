@@ -1,10 +1,13 @@
 """Tests for ArcticStorage."""
 
+import contextlib
 import warnings
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
+from fin3.config.settings import LockConfig
 from fin3.exceptions import StorageError
 from fin3.storage.arctic import ArcticStorage, _suppress_blockmanager_warning
 from tests.conftest import make_ohlcv
@@ -161,3 +164,60 @@ class TestWarningSuppression:
 
         assert result is not None
         assert not any("BlockManagerUnconsolidated" in h for h in hits)
+
+
+class TestSymbolLocking:
+    """Per-(library, symbol) advisory locking around mutating operations."""
+
+    def test_lock_symbol_is_noop_when_locking_disabled(
+        self, storage: ArcticStorage
+    ) -> None:
+        """Without a LockConfig, lock_symbol yields a nullcontext (no lock files)."""
+        cm = storage.lock_symbol("test-lib", "AAPL")
+        assert isinstance(cm, contextlib.nullcontext)
+
+    def test_delete_symbol_acquires_lock(self, tmp_path) -> None:
+        storage = ArcticStorage.from_lmdb(
+            str(tmp_path / "lmdb"),
+            lock=LockConfig(enabled=True, lock_dir=str(tmp_path / "locks")),
+        )
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+
+        # Wrap the real lock_symbol so the call is recorded and still performed.
+        spy = MagicMock(wraps=storage.lock_symbol)
+        storage.lock_symbol = spy  # type: ignore[method-assign]
+
+        storage.delete_symbol("test-lib", "AAPL")
+
+        spy.assert_called_once_with("test-lib", "AAPL")
+        assert not storage.has_symbol("test-lib", "AAPL")
+
+    def test_defragment_symbol_acquires_lock(self, tmp_path) -> None:
+        storage = ArcticStorage.from_lmdb(
+            str(tmp_path / "lmdb"),
+            lock=LockConfig(enabled=True, lock_dir=str(tmp_path / "locks")),
+        )
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        storage.write("test-lib", "AAPL", df)
+
+        spy = MagicMock(wraps=storage.lock_symbol)
+        storage.lock_symbol = spy  # type: ignore[method-assign]
+
+        # The lock wraps the fragmentation check too, so it is acquired even
+        # when there is nothing to compact.
+        storage.defragment_symbol("test-lib", "AAPL")
+
+        spy.assert_called_once_with("test-lib", "AAPL")
+
+    def test_lock_symbol_is_real_lock_when_enabled(self, tmp_path) -> None:
+        """When locking is enabled, lock_symbol actually creates a lock file."""
+        lock_dir = tmp_path / "locks"
+        storage = ArcticStorage.from_lmdb(
+            str(tmp_path / "lmdb"),
+            lock=LockConfig(enabled=True, lock_dir=str(lock_dir)),
+        )
+        with storage.lock_symbol("test-lib", "AAPL"):
+            pass
+        # The lock file is left in place after release (see locking.py docs).
+        assert any(lock_dir.glob("*.lock"))
