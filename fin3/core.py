@@ -219,7 +219,21 @@ class MarketDataFetcher:
         max_cost: float,
         tracker: ResourceTracker | None = None,
     ) -> None:
-        """Estimate total download cost and raise if it exceeds *max_cost*."""
+        """Estimate total download cost and raise if it exceeds *max_cost*.
+
+        ``detect_gaps`` chunks large ranges into many small gaps (to bound
+        per-fetch memory), so a single symbol's forward range can produce
+        dozens of chunks. Calling the provider cost API once per chunk means
+        thousands of sequential HTTP calls for a multi-symbol backfill, which
+        is pathologically slow (Databento throttles the metadata endpoint
+        under rapid repeated calls).
+
+        Cost is billed over the requested range, so we collapse each symbol's
+        gaps to their union span and make a single cost call per symbol. This
+        is a conservative ceiling: if a symbol has interior holes (ranges we
+        already have), the union span slightly over-counts them — the safe
+        direction for an upper-limit check.
+        """
         total_cost = 0.0
         n = len(symbols)
         for i, symbol in enumerate(symbols, 1):
@@ -228,14 +242,18 @@ class MarketDataFetcher:
             gaps = self._symbol_gaps(
                 lib_name, symbol, provider, asset_type, resolution, start, end
             )
-            for gap_start, gap_end in gaps:
-                total_cost += provider.estimate_cost(  # type: ignore[attr-defined]
-                    symbol=symbol,
-                    start=gap_start,
-                    end=gap_end,
-                    resolution=resolution,
-                    asset_type=asset_type,
-                )
+            if not gaps:
+                continue
+            # One cost call over the union span of this symbol's gaps.
+            gap_start = min(gs for gs, _ in gaps)
+            gap_end = max(ge for _, ge in gaps)
+            total_cost += provider.estimate_cost(  # type: ignore[attr-defined]
+                symbol=symbol,
+                start=gap_start,
+                end=gap_end,
+                resolution=resolution,
+                asset_type=asset_type,
+            )
 
         if tracker is not None:
             tracker.set_phase("cost estimate complete")
