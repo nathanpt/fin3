@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import warnings
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterator
 
 import arcticdb as adb
 import pandas as pd
@@ -13,21 +14,32 @@ import structlog
 from fin3.config.settings import MinioConfig
 from fin3.exceptions import StorageError
 
-# ArcticDB constructs returned DataFrames via a pandas internal path that pandas
-# deprecates ("Passing a BlockManagerUnconsolidated to DataFrame is
-# deprecated"). The warning originates in arcticdb's code, not ours, and is not
-# actionable until arcticdb updates. It fires on essentially every read and,
-# when it reaches the terminal mid-render, tears apart the live monitor's
-# in-place redraw (the warning text welds onto the box border). Suppress it at
-# import time so the filter is active before any read, regardless of when (or
-# whether) logging is configured.
-warnings.filterwarnings(
-    "ignore",
-    message=r".*BlockManagerUnconsolidated.*",
-    category=DeprecationWarning,
-)
-
 logger = structlog.get_logger(__name__)
+
+
+@contextmanager
+def _suppress_blockmanager_warning() -> Iterator[None]:
+    """Suppress the pandas/arcticdb ``BlockManagerUnconsolidated`` deprecation.
+
+    ArcticDB constructs returned DataFrames via a pandas internal path that
+    pandas deprecates ("Passing a BlockManagerUnconsolidated to DataFrame is
+    deprecated"). The warning originates in arcticdb's code, not ours, and is
+    not actionable until arcticdb updates. It fires on essentially every read
+    and, when it reaches the terminal mid-render, tears apart the live
+    monitor's in-place redraw.
+
+    A module-level ``warnings.filterwarnings`` is unreliable here: arcticdb
+    and other libs re-prepend their own filters at import time, landing ahead
+    of ours and winning. Using ``catch_warnings()`` scopes the suppression to
+    just the read call, independent of the global filter ordering.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*BlockManagerUnconsolidated.*",
+            category=DeprecationWarning,
+        )
+        yield
 
 _S3_LIB_NAME = "main"
 
@@ -227,8 +239,9 @@ class ArcticStorage:
                 kwargs["date_range"] = date_range
             if columns is not None:
                 kwargs["columns"] = columns
-            result = lib.read(symbol, **kwargs)
-            return result.data  # type: ignore[no-any-return]
+            with _suppress_blockmanager_warning():
+                result = lib.read(symbol, **kwargs)
+                return result.data  # type: ignore[no-any-return]
         except adb.exceptions.NoSuchVersionException:
             return None
         except Exception as exc:
@@ -284,7 +297,8 @@ class ArcticStorage:
     def has_symbol(self, library: str, symbol: str) -> bool:
         lib = self._get_or_create_library(library)
         try:
-            lib.read(symbol)
+            with _suppress_blockmanager_warning():
+                lib.read(symbol)
             return True
         except adb.exceptions.NoSuchVersionException:
             return False
