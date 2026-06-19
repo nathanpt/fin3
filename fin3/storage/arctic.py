@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from datetime import datetime
 from typing import Any
 
@@ -11,6 +12,20 @@ import structlog
 
 from fin3.config.settings import MinioConfig
 from fin3.exceptions import StorageError
+
+# ArcticDB constructs returned DataFrames via a pandas internal path that pandas
+# deprecates ("Passing a BlockManagerUnconsolidated to DataFrame is
+# deprecated"). The warning originates in arcticdb's code, not ours, and is not
+# actionable until arcticdb updates. It fires on essentially every read and,
+# when it reaches the terminal mid-render, tears apart the live monitor's
+# in-place redraw (the warning text welds onto the box border). Suppress it at
+# import time so the filter is active before any read, regardless of when (or
+# whether) logging is configured.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*BlockManagerUnconsolidated.*",
+    category=DeprecationWarning,
+)
 
 logger = structlog.get_logger(__name__)
 

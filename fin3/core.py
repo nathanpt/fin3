@@ -394,6 +394,17 @@ def _validate_inputs(
 ) -> None:
     if not symbols:
         raise ValueError("symbols must be a non-empty list")
+    # Reject obviously-invalid symbols (e.g. "...", "???", "---") early with a
+    # clear message rather than letting them flow to the provider as a cryptic
+    # API error. Every legitimate ticker / instrument id contains at least one
+    # alphanumeric character across all supported conventions (AAPL, BRK.B,
+    # "BRK B" for ARCX.PILLAR CMS, BTC-USD, ES.n.0, ...).
+    invalid = [s for s in symbols if not any(c.isalnum() for c in s)]
+    if invalid:
+        raise ValueError(
+            f"invalid symbol(s): {invalid} "
+            "(symbols must contain at least one letter or digit)"
+        )
     if start >= end:
         raise ValueError(f"start ({start}) must be before end ({end})")
 

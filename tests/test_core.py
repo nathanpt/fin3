@@ -125,6 +125,49 @@ class TestMarketDataFetcherE2E:
                 end=datetime(2024, 1, 1, tzinfo=timezone.utc),
             )
 
+    @pytest.mark.parametrize(
+        "bad",
+        ["...", "???", "---", "   ", "@#$"],
+    )
+    def test_get_data_invalid_symbol_rejected(
+        self, lmdb_storage: ArcticStorage, bad: str
+    ) -> None:
+        """Symbols with no alphanumeric chars are rejected up front."""
+        fetcher = _make_fetcher(lmdb_storage)
+
+        with pytest.raises(ValueError, match="invalid symbol"):
+            fetcher.get_data(
+                asset_type=AssetType.EQUITY_US,
+                provider="databento",
+                resolution=Resolution.ONE_DAY,
+                symbols=[bad],
+                start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            )
+
+    def test_get_data_valid_symbol_formats_accepted(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Realistic ticker formats pass the alphanumeric check (no ValueError)."""
+        # Each of these contains at least one alphanumeric char and should not
+        # trip the invalid-symbol guard. They'll fail later for other reasons
+        # (no provider), but not with the validation error.
+        for sym in ["AAPL", "BRK.B", "BRK B", "BTC-USD", "ES.n.0", "123"]:
+            try:
+                _make_fetcher(lmdb_storage).get_data(
+                    asset_type=AssetType.EQUITY_US,
+                    provider="databento",
+                    resolution=Resolution.ONE_DAY,
+                    symbols=[sym],
+                    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    end=datetime(2024, 1, 2, tzinfo=timezone.utc),
+                )
+            except ValueError as exc:
+                pytest.fail(f"symbol {sym!r} wrongly rejected: {exc}")
+            except Exception:
+                # Other failures (provider/storage) are expected and fine.
+                pass
+
 
 class TestCostGate:
     """Tests for the max_cost pre-download cost check."""

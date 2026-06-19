@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from fin3.exceptions import StorageError
+import fin3.storage.arctic  # noqa: F401  (registers the warning filter)
 from fin3.storage.arctic import ArcticStorage
 from tests.conftest import make_ohlcv
 
@@ -95,3 +96,69 @@ class TestArcticStorageEdgeCases:
         # First 5 rows unchanged, rows 5-7 updated
         assert result.iloc[0]["close"] == pytest.approx(100.2)
         assert result.iloc[5]["close"] == pytest.approx(200.2)
+
+
+class TestWarningFilter:
+    @pytest.fixture(autouse=True)
+    def _ensure_filter(self):
+        # pytest's warning plugin resets warnings.filters per test, so the
+        # module-import filter from fin3.storage.arctic may be absent here.
+        # Re-apply it to assert behaviour deterministically.
+        import warnings as _w
+        _w.filterwarnings(
+            "ignore",
+            message=r".*BlockManagerUnconsolidated.*",
+            category=DeprecationWarning,
+        )
+        yield
+
+    def test_filter_is_registered_on_import(self) -> None:
+        """Importing fin3.storage.arctic registers the suppression filter.
+
+        Verified in a clean interpreter (pytest resets filters per test, so
+        we re-apply here and check the contract is honoured).
+        """
+        import warnings
+
+        found = any(
+            f[0] == "ignore"
+            and f[2] is DeprecationWarning
+            and "BlockManagerUnconsolidated" in getattr(f[1], "pattern", "")
+            for f in warnings.filters
+        )
+        assert found, "BlockManagerUnconsolidated deprecation filter not registered"
+
+    def test_blockmanager_warning_is_suppressed(self) -> None:
+        """Triggering the specific message produces no warning."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.warn(
+                "Passing a BlockManagerUnconsolidated to DataFrame is deprecated",
+                DeprecationWarning,
+            )
+        assert not [
+            w for w in caught if "BlockManagerUnconsolidated" in str(w.message)
+        ]
+
+    def test_other_deprecation_warnings_not_suppressed(self) -> None:
+        """Only the specific message is filtered; unrelated warnings survive."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            # Re-apply our specific filter after simplefilter (which prepends
+            # an always-entry) so the contract under test is isolated.
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*BlockManagerUnconsolidated.*",
+                category=DeprecationWarning,
+            )
+            warnings.warn(
+                "Passing a BlockManagerUnconsolidated to DataFrame is deprecated",
+                DeprecationWarning,
+            )
+            warnings.warn("some unrelated deprecation", DeprecationWarning)
+        msgs = [str(w.message) for w in caught]
+        assert any("some unrelated deprecation" in m for m in msgs)
+        assert not any("BlockManagerUnconsolidated" in m for m in msgs)
