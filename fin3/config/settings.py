@@ -45,11 +45,27 @@ ProviderConfig = Annotated[
 ]
 
 
+class LockConfig(BaseModel):
+    """Configuration for per-symbol cross-process file locking.
+
+    Locks guard writes in ``get_data()`` so that two processes cannot
+    simultaneously fetch and store the same symbol, which would otherwise
+    corrupt the underlying ArcticDB library. Set ``enabled`` to ``False`` to
+    disable locking entirely (no lock files are written).
+    """
+
+    enabled: bool = True
+    lock_dir: str = "/tmp/fin3/locks"
+    timeout_s: float = 600.0
+    poll_interval_s: float = 0.5
+
+
 class ClientConfig(BaseSettings):
     minio: MinioConfig
     providers: dict[str, ProviderConfig] = {}
     log_level: str = "INFO"
     log_format: str = "json"
+    lock: LockConfig = Field(default_factory=LockConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="FIN3_",

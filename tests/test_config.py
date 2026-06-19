@@ -58,6 +58,44 @@ class TestClientConfig:
         assert config.log_level == "INFO"
         assert config.log_format == "json"
 
+    def test_lock_defaults(self) -> None:
+        config = ClientConfig(
+            minio=MinioConfig(
+                endpoint="localhost:9000", access_key="a", secret_key="b"
+            ),
+        )
+        assert config.lock.enabled is True
+        assert config.lock.timeout_s == 600.0
+        assert config.lock.poll_interval_s == 0.5
+        assert config.lock.lock_dir == "/tmp/fin3/locks"
+
+    def test_lock_config_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FIN3_MINIO__ENDPOINT", "localhost:9000")
+        monkeypatch.setenv("FIN3_MINIO__ACCESS_KEY", "minioadmin")
+        monkeypatch.setenv("FIN3_MINIO__SECRET_KEY", "minioadmin")
+        monkeypatch.setenv("FIN3_LOCK__TIMEOUT_S", "120")
+        monkeypatch.setenv("FIN3_LOCK__ENABLED", "false")
+        config = ClientConfig()  # type: ignore[call-arg]
+        assert config.lock.timeout_s == 120.0
+        assert config.lock.enabled is False
+
+    def test_lock_default_is_independent_per_instance(self) -> None:
+        config_a = ClientConfig(
+            minio=MinioConfig(
+                endpoint="localhost:9000", access_key="a", secret_key="b"
+            ),
+        )
+        config_b = ClientConfig(
+            minio=MinioConfig(
+                endpoint="localhost:9000", access_key="a", secret_key="b"
+            ),
+        )
+        # Mutating one instance must not leak into the other; this guards
+        # against a shared mutable default (the ``= LockConfig()`` bug).
+        assert config_a.lock is not config_b.lock
+        config_a.lock.timeout_s = 1.0
+        assert config_b.lock.timeout_s == 600.0
+
     def test_empty_providers_default(self) -> None:
         config = ClientConfig(
             minio=MinioConfig(
