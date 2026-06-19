@@ -342,8 +342,18 @@ class TestResourceTracker:
 
         assert provider.fetch is original_fetch
 
-    def test_tracker_writes_metrics_file(self, storage) -> None:
-        """Verify the metrics file is written during tracking."""
+    def test_tracker_writes_metrics_file(self, storage, monkeypatch) -> None:
+        """Verify the metrics file is written during tracking (tmux mode).
+
+        The shared metrics file is now tmux-exclusive (the inline TTY path
+        reads tracker state directly via the live renderable), so simulate
+        tmux mode without spawning a real pane.
+        """
+        import fin3.monitoring.tracker as tracker_mod
+
+        monkeypatch.setattr(tracker_mod, "is_in_tmux", lambda: True)
+        monkeypatch.setattr(tracker_mod, "create_monitor_pane", lambda *a, **k: None)
+
         provider = MagicMock()
         provider.fetch = MagicMock(return_value=pd.DataFrame())
 
@@ -356,7 +366,7 @@ class TestResourceTracker:
         )
 
         with tracker:
-            time.sleep(0.2)
+            time.sleep(0.7)  # let the writer thread flush at least once
             # File should exist and be valid JSON during operation
             assert Path(tracker._metrics_file).exists()
             with open(tracker._metrics_file) as f:
@@ -364,8 +374,13 @@ class TestResourceTracker:
             assert "elapsed" in data
             assert "symbols" in data
 
-    def test_tracker_cleans_up_metrics_file(self, storage) -> None:
-        """Verify temp metrics file is removed after exit."""
+    def test_tracker_cleans_up_metrics_file(self, storage, monkeypatch) -> None:
+        """Verify temp metrics file is removed after exit (tmux mode)."""
+        import fin3.monitoring.tracker as tracker_mod
+
+        monkeypatch.setattr(tracker_mod, "is_in_tmux", lambda: True)
+        monkeypatch.setattr(tracker_mod, "create_monitor_pane", lambda *a, **k: None)
+
         provider = MagicMock()
         provider.fetch = MagicMock(return_value=pd.DataFrame())
 
@@ -378,7 +393,7 @@ class TestResourceTracker:
         )
 
         with tracker:
-            time.sleep(0.1)
+            time.sleep(0.7)
             path = tracker._metrics_file
 
         assert not Path(path).exists()

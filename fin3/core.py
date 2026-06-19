@@ -74,7 +74,7 @@ class MarketDataFetcher:
             if max_cost is not None and hasattr(prov, "estimate_cost"):
                 self._check_cost(
                     lib_name, symbols, prov, strategy, asset_type, resolution,
-                    start, end, max_cost,
+                    start, end, max_cost, tracker,
                 )
 
             for symbol in symbols:
@@ -217,10 +217,14 @@ class MarketDataFetcher:
         start: datetime,
         end: datetime,
         max_cost: float,
+        tracker: ResourceTracker | None = None,
     ) -> None:
         """Estimate total download cost and raise if it exceeds *max_cost*."""
         total_cost = 0.0
-        for symbol in symbols:
+        n = len(symbols)
+        for i, symbol in enumerate(symbols, 1):
+            if tracker is not None:
+                tracker.set_phase(f"estimating cost {i}/{n}: {symbol}")
             gaps = self._symbol_gaps(
                 lib_name, symbol, provider, asset_type, resolution, start, end
             )
@@ -232,6 +236,9 @@ class MarketDataFetcher:
                     resolution=resolution,
                     asset_type=asset_type,
                 )
+
+        if tracker is not None:
+            tracker.set_phase("cost estimate complete")
 
         logger.info(
             "core.cost_estimate",

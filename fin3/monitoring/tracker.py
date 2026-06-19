@@ -26,6 +26,7 @@ import pandas as pd
 import structlog
 from rich.console import Console
 from rich.live import Live
+from rich.panel import Panel
 
 from fin3.monitoring.collector import (
     ByteCounter,
@@ -45,6 +46,37 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 SAMPLE_INTERVAL = 0.5
+
+
+class _LiveView:
+    """Dynamic renderable for ``rich.live.Live`` auto-refresh.
+
+    Live's internal refresh thread calls ``__rich__`` on each tick, reading
+    the tracker's current state. This avoids calling ``Live.update()`` from
+    our own background thread — Live is not safe to drive from a thread other
+    than the one that owns it, and doing so corrupted the in-place redraw
+    (duplicate frames, borders on the wrong line).
+    """
+
+    def __init__(self, tracker: ResourceTracker) -> None:
+        self._tracker = tracker
+
+    def __rich__(self) -> Panel:
+        t = self._tracker
+        elapsed = time.monotonic() - t._start_time
+        metrics = SampledMetrics(
+            peak_rss_bytes=t._sampler.peak_rss,
+            baseline_rss_bytes=t._sampler.baseline_rss,
+            network_bytes=t._byte_counter.total_bytes,
+            fetch_count=t._byte_counter.fetch_count,
+            disk_before_bytes=t._disk_before,
+            # Disk delta is only measurable at completion (a per-symbol scan
+            # mid-run is too costly); show 0 delta while running.
+            disk_after_bytes=t._disk_before,
+        )
+        return render_live_panel(
+            metrics, elapsed, t._phase, t._symbols, t._resolution.value,
+        )
 
 
 class ResourceTracker:
@@ -221,35 +253,31 @@ class ResourceTracker:
     def _setup_display(self) -> None:
         """Set up the live display.
 
-        - Inside tmux: open a dedicated monitor pane (separate process).
+        - Inside tmux: open a dedicated monitor pane (separate process) that
+          tails a shared metrics file, updated by a writer thread.
         - Native TTY (no tmux): an inline ``rich.live`` display on stderr.
+          Live auto-refreshes by re-rendering a dynamic renderable that reads
+          the tracker's current state — no writer thread or metrics file is
+          needed (and Live must not be driven from another thread).
         - Non-TTY (piped / CI / tests): no live display; summary only.
-
-        A metrics file + writer thread are always created (used by the tmux
-        pane, and cheap otherwise).
         """
-        # Always create a metrics file for the tmux display
-        fd, self._metrics_file = tempfile.mkstemp(
-            suffix=".json", prefix="fin3-monitor-", dir="/tmp",
-        )
-        os.close(fd)
-        self._write_initial_metrics()
-
         if is_in_tmux():
+            fd, self._metrics_file = tempfile.mkstemp(
+                suffix=".json", prefix="fin3-monitor-", dir="/tmp",
+            )
+            os.close(fd)
+            self._write_initial_metrics()
             self._pane_id = create_monitor_pane(self._metrics_file)
+            self._writer_thread = threading.Thread(
+                target=self._writer_loop, daemon=True,
+            )
+            self._writer_thread.start()
         elif self._is_tty:
             # Native terminal without tmux: render an inline live panel on
             # stderr. redirect_stderr routes structlog JSON lines above the
             # bar so they interleave cleanly instead of corrupting the redraw.
-            initial = render_live_panel(
-                SampledMetrics(baseline_rss_bytes=self._sampler.baseline_rss),
-                0.0,
-                "initialising...",
-                self._symbols,
-                self._resolution.value,
-            )
             self._live = Live(
-                initial,
+                _LiveView(self),
                 console=self._console,
                 refresh_per_second=2,
                 transient=False,
@@ -257,12 +285,7 @@ class ResourceTracker:
                 redirect_stderr=True,
             )
             self._live.start()
-
-        # Start writer thread regardless — logs structured metrics too
-        self._writer_thread = threading.Thread(
-            target=self._writer_loop, daemon=True,
-        )
-        self._writer_thread.start()
+        # Non-TTY: nothing — summary is printed on exit.
 
     def _write_initial_metrics(self) -> None:
         """Write initial metrics so the display can start rendering immediately."""
@@ -295,7 +318,9 @@ class ResourceTracker:
             self._write_current_metrics(done=False)
 
     def _write_current_metrics(self, done: bool) -> None:
-        """Write current metrics to the shared file."""
+        """Write current metrics to the shared file (tmux mode only)."""
+        if not self._metrics_file:
+            return
         elapsed = time.monotonic() - self._start_time
         data = {
             "peak_rss_bytes": self._sampler.peak_rss,
@@ -319,26 +344,6 @@ class ResourceTracker:
                 json.dump(data, f)
         except OSError:
             pass
-
-        # Inline live display (native TTY): refresh the panel.
-        if self._live is not None:
-            try:
-                live_metrics = SampledMetrics(
-                    peak_rss_bytes=self._sampler.peak_rss,
-                    baseline_rss_bytes=self._sampler.baseline_rss,
-                    network_bytes=self._byte_counter.total_bytes,
-                    fetch_count=self._byte_counter.fetch_count,
-                    disk_before_bytes=self._disk_before,
-                    disk_after_bytes=self._disk_before,
-                )
-                self._live.update(
-                    render_live_panel(
-                        live_metrics, elapsed, self._phase,
-                        self._symbols, self._resolution.value,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - display must not crash the run
-                logger.warning("monitor.live_update_failed", error=str(exc))
 
     def _write_metrics(self, metrics: SampledMetrics, done: bool) -> None:
         """Write final metrics to the shared file."""
