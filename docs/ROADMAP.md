@@ -56,16 +56,24 @@ while producing useful infrastructure. Items marked with checkmarks are done.
     dry-run reporting, explicit per-symbol statuses, failure reporting, and
     documentation in `docs/USAGE.md` / `docs/DESIGN.md`.
 
-- **Concurrent access protection** — The current design assumes single-process
-  execution. If two processes call `get_data("AAPL", ...)` concurrently, both
-  detect the same gap, both fetch from the provider, and the second `update` may
-  overwrite the first or produce a conflicted state. With
-  `prune_previous_versions=True`, there is no rollback.
-  - **Trigger**: Library is used on a shared dev server where multiple processes
-    may call `get_data()` simultaneously.
-  - **Potential solutions**: Advisory lock (file-based or in MinIO metadata) per
-    symbol; PID-scoped locking with timeout and deadlock detection; ArcticDB
-    staged writes (`write(staged=True)` + `finalize_staged_data()`).
+- ~~**Concurrent access protection** — The original design assumed single-process
+  execution; two processes calling `get_data()` for the same symbol concurrently
+  would both detect the same gap, both fetch, and the second `update` (with
+  `prune_previous_versions=True`) would silently clobber the first with no
+  rollback.~~
+  - **Completed**: Implemented via `fin3.storage.locking.SymbolLock` — file-based
+    `fcntl.flock` advisory locks scoped per `(library, symbol)`. Stdlib-only
+    (no new dependencies); locks auto-release on process exit — clean return,
+    crash, or `SIGKILL` — because `flock` is tied to the open file description,
+    so there are no stale locks to clean up. Configured via `LockConfig`
+    (`FIN3_LOCK__ENABLED`, `FIN3_LOCK__LOCK_DIR`, `FIN3_LOCK__TIMEOUT_S`,
+    `FIN3_LOCK__POLL_INTERVAL_S`); on by default. Guards the check-then-act body
+    of `MarketDataFetcher._ensure_symbol` plus `ArcticStorage.delete_symbol`
+    and `defragment_symbol`; contention is reported via `LockAcquisitionError`
+    with the holder's PID/host. Covered by unit tests and a cross-process
+    integration test (`tests/integration/test_concurrency.py`) proving two
+    concurrent `get_data()` calls for the same symbol serialize to a single
+    provider fetch. Documented in `docs/USAGE.md` / `docs/DESIGN.md`.
 
 - **Crypto market data ingestion** — Add a reliable path to download and store
   cryptocurrency OHLCV/ticker data, starting with Bitcoin (e.g. `BTC-USD` or

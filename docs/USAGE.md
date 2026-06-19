@@ -241,7 +241,31 @@ print(report.would_defrag_count, report.failed_count)
 filling. Use it after bulk ingestion or gap-filling jobs; do not enable it for
 every routine read unless fragmentation is known to be a problem. Run
 maintenance when no other ingestion process is writing to the same library.
-Concurrent access protection is a separate Phase 2 concern.
+
+## Concurrent Access Protection
+
+Concurrent `get_data()` calls for the *same* symbol serialize automatically
+via per-`(library, symbol)` file locks, so there is no double-fetch and no
+risk of one process clobbering another's write. One process detects the gap,
+fetches, and writes while the other waits; once it acquires the lock the second
+process finds the gap already filled and skips the fetch entirely.
+
+Locking is **on by default**. It is configured through the `FIN3_LOCK__*`
+environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FIN3_LOCK__ENABLED` | `true` | Master switch; set to `false` to disable all locking. |
+| `FIN3_LOCK__LOCK_DIR` | `/tmp/fin3/locks` | Directory holding the per-symbol lock files. |
+| `FIN3_LOCK__TIMEOUT_S` | `600` | Seconds to wait for a contended lock before raising `LockAcquisitionError`. |
+| `FIN3_LOCK__POLL_INTERVAL_S` | `0.5` | Polling interval while waiting for a lock. |
+
+Locks are advisory `flock` locks tied to an open file description, so they
+**auto-release on process exit** — including crashes and `SIGKILL` — with no
+stale-lock cleanup or heartbeat required. Because the lock files live on the
+local filesystem, locking coordinates processes that share a single host; it
+does not mediate access across separate machines (in a multi-host deployment
+the storage backend itself remains the shared state).
 
 ## Resource Monitoring
 

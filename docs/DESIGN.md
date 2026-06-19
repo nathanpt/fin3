@@ -687,7 +687,30 @@ For the full exception hierarchy and retry semantics, see Section 4.4 (Error Tax
 - **Rate limiting**: Respect provider-specific rate limits. Use `time.sleep` or provider-provided wait mechanisms. Raise `ProviderRateLimitError` on 429 responses.
 - **Data quality issues**: If validation fails, log the issue with full context (symbol, date range, provider) and raise `SchemaValidationError` (Stage 1) or `DataValidationError` (Stage 2). Do not write invalid data to ArcticDB.
 - **Boundary mismatch**: If the reindexed data's index does not exactly cover `[gap_start, gap_end]`, raise `BoundaryMismatchError` before the destructive `update`. This indicates a bug in the master grid / reindexing pipeline.
-- **Concurrent writes**: **Phase 1 assumes single-process execution.** This is not enforced in code. If two processes call `get_data()` for the same symbol concurrently on a shared server, both will detect the same gap, fetch from the provider, and issue `update(date_range=...)`. The second update may silently overwrite the first, producing data loss or a conflicted state. With `prune_previous_versions=True`, there is no rollback. Recovery requires reverting to a MinIO infrastructure-level snapshot. This is a known limitation — see `docs/roadmap.md` for the planned mitigation strategy. If parallel ingestion is needed later, use `write(staged=True)` + `finalize_staged_data()`.
+- **Concurrent writes**: Protected by per-`(library, symbol)` advisory file
+  locks (`fcntl.flock`, `LOCK_EX`) implemented in
+  `fin3.storage.locking.SymbolLock`. The check-then-act body of
+  `MarketDataFetcher._ensure_symbol` — detect gap → fetch from provider →
+  `update(date_range=...)` — is wrapped in
+  `ArcticStorage.lock_symbol(library, symbol)`, as are the mutating
+  `delete_symbol` and `defragment_symbol` operations. With locking enabled, two
+  processes that call `get_data()` for the same symbol concurrently serialize:
+  one detects the gap, fetches, and writes; the other acquires the lock
+  afterward, finds no gap, and skips the fetch (no double-fetch, no silent
+  overwrite of the first write). `flock` was chosen deliberately: it is
+  stdlib-only (no new dependency), and because the lock is tied to the open file
+  *description* it auto-releases on process exit for any reason — clean return,
+  unhandled exception, `SIGKILL`, or segfault — so there are no stale locks to
+  clean up and no heartbeat/lease machinery. The trade-off is that the lock
+  files are filesystem-local, so this coordinates processes on a **single host**
+  (the deployment model fin3 targets); in a multi-host deployment the storage
+  backend itself remains the shared state. Locking is configured via
+  `LockConfig` (`FIN3_LOCK__*`): `enabled` (on by default), `lock_dir`,
+  `timeout_s`, and `poll_interval_s`. If a lock cannot be acquired within
+  `timeout_s`, a `LockAcquisitionError` is raised reporting the holder's PID and
+  hostname (read back from the lock file) so an operator can locate it. If you
+  need genuinely parallel ingestion, ArcticDB staged writes
+  (`write(staged=True)` + `finalize_staged_data()`) remain an option.
 - **Write/update routing**: Gap detection determines routing naturally — `SymbolNotFound` → `write`, existing symbol → `update(date_range=...)`. For existing symbols where the gap covers the full requested range, `update` is used (not `write`) to avoid destroying data outside the requested range.
 - **Empty provider results**: When a provider returns an empty DataFrame for a range (symbol does not exist or no data in range), write only metadata to `fin3.metadata` with empty/invalid lifecycle bounds. Do not write a padded grid to the data library. This avoids storage pollution and wasted API cost. Subsequent calls for that symbol short-circuit at the metadata layer.
 
