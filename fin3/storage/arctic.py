@@ -10,11 +10,14 @@ from typing import Any, Iterator
 import arcticdb as adb
 import pandas as pd
 import structlog
+from arcticdb.version_store.admin_tools import sum_sizes
 
 from fin3.config.settings import MinioConfig
 from fin3.exceptions import StorageError
 
 logger = structlog.get_logger(__name__)
+
+_S3_LIB_NAME = "main"
 
 
 @contextmanager
@@ -40,8 +43,6 @@ def _suppress_blockmanager_warning() -> Iterator[None]:
             category=DeprecationWarning,
         )
         yield
-
-_S3_LIB_NAME = "main"
 
 
 class ArcticStorage:
@@ -308,8 +309,6 @@ class ArcticStorage:
 
         Returns 0 if the symbol does not exist.
         """
-        from arcticdb.version_store.admin_tools import sum_sizes
-
         lib = self._get_or_create_library(library)
         try:
             sizes = lib.admin_tools().get_sizes_for_symbol(symbol)
@@ -323,12 +322,10 @@ class ArcticStorage:
 
         Returns 0 if the symbol does not exist or segment metadata is unavailable.
         """
-        import arcticdb as _adb
-
         lib = self._get_or_create_library(library)
         try:
             sizes = lib.admin_tools().get_sizes_for_symbol(symbol)
-            table_data = sizes.get(_adb.KeyType.TABLE_DATA)
+            table_data = sizes.get(adb.KeyType.TABLE_DATA)
             if table_data is None:
                 return 0
             return int(table_data.count)
@@ -345,8 +342,6 @@ class ArcticStorage:
 
         Returns 0 if the library is empty or metadata is unavailable.
         """
-        from arcticdb.version_store.admin_tools import sum_sizes
-
         lib = self._get_or_create_library(library)
         try:
             sizes = lib.admin_tools().get_sizes()

@@ -1,11 +1,12 @@
 """Tests for ArcticStorage."""
 
+import warnings
 from datetime import datetime, timezone
 
 import pytest
 
 from fin3.exceptions import StorageError
-from fin3.storage.arctic import ArcticStorage
+from fin3.storage.arctic import ArcticStorage, _suppress_blockmanager_warning
 from tests.conftest import make_ohlcv
 
 
@@ -107,9 +108,6 @@ class TestWarningSuppression:
 
     def test_context_manager_suppresses_target_only(self) -> None:
         """_suppress_blockmanager_warning hides the target message, lets others through."""
-        import warnings
-        from fin3.storage.arctic import _suppress_blockmanager_warning
-
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             with _suppress_blockmanager_warning():
@@ -124,9 +122,6 @@ class TestWarningSuppression:
 
     def test_context_manager_is_scoped(self) -> None:
         """After the context exits, the target warning is visible again."""
-        import warnings
-        from fin3.storage.arctic import _suppress_blockmanager_warning
-
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             with _suppress_blockmanager_warning():
@@ -149,8 +144,6 @@ class TestWarningSuppression:
         ignore filter. We intercept showwarning (without touching filters) to
         detect whether the warning actually reaches display during a read.
         """
-        import warnings
-
         df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
         storage.write("warn-lib", "AAPL", df)
 
