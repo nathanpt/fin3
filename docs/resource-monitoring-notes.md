@@ -14,17 +14,23 @@ ArcticDB size queries or the monitoring pipeline.
 Phase 2 roadmap item **"Resource monitoring — disk/memory/network tracking"**.
 
 A `ResourceTracker` context manager that instruments every `get_data()` call
-and surfaces resource usage via a **live tmux monitor pane** (rich panel,
-real-time updates through a shared JSON metrics file) plus a summary panel on
+and surfaces resource usage via a **live info bar** plus a summary panel on
 completion. **On by default** — wired into `MarketDataFetcher.get_data()`, no
-flags needed.
+flags needed. Display is environment-aware:
+
+- **Inside tmux**: a dedicated monitor pane opens (separate process reading
+  a shared JSON metrics file at 2 fps).
+- **Native terminal (no tmux)**: an inline `rich.live` bar redraws in place
+  on stderr; `redirect_stderr=True` routes structlog JSON lines above the bar
+  so they interleave cleanly.
+- **Piped / CI / non-TTY**: no live display; summary panel to stderr only.
 
 - `fin3/monitoring/` — `tracker.py`, `collector.py`, `render.py`, `tmux.py`, `display.py`
 - Memory: `psutil` RSS sampling (background thread, peak delta)
 - Disk: ArcticDB symbol sizes (before/after delta + library total)
 - Network: application-level byte counting via provider `fetch()` wrapping
 - tmux pane runs `python -m fin3.monitoring.display <metrics.json>`, tails
-  the file at 2 fps; falls back to a stderr summary outside tmux
+  the file at 2 fps
 - `tmux.py` uses `sys.executable` so the pane runs under the same venv as
   the parent (critical when fin3 lives in a project venv, not system-wide)
 

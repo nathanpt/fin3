@@ -13,7 +13,6 @@ from fin3.config.settings import (
     MinioConfig,
 )
 from fin3.schemas import empty_ohlcv
-from fin3.schemas import Resolution
 from fin3.storage.arctic import ArcticStorage
 
 

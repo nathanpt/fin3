@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import pandas as pd
 import structlog
 from rich.console import Console
+from rich.live import Live
 
 from fin3.monitoring.collector import (
     ByteCounter,
@@ -33,7 +34,7 @@ from fin3.monitoring.collector import (
     compute_library_size,
     compute_symbol_sizes,
 )
-from fin3.monitoring.render import render_summary
+from fin3.monitoring.render import render_live_panel, render_summary
 from fin3.monitoring.tmux import create_monitor_pane, is_in_tmux, kill_pane
 
 if TYPE_CHECKING:
@@ -84,6 +85,7 @@ class ResourceTracker:
 
         self._metrics_file: str = ""
         self._pane_id: str | None = None
+        self._live: Live | None = None
         self._writer_thread: threading.Thread | None = None
         self._stop_writer = threading.Event()
         self._phase: str = ""
@@ -163,6 +165,11 @@ class ResourceTracker:
             time.sleep(2.5)  # let display render final summary
             kill_pane(self._pane_id)
 
+        # Stop inline live display before rendering the final summary
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
         # Render summary to stderr
         if self._is_tty or True:  # always print summary
             elapsed = self._end_time - self._start_time
@@ -212,7 +219,15 @@ class ResourceTracker:
             self._original_fetch = None
 
     def _setup_display(self) -> None:
-        """Create the tmux monitor pane (if in tmux) or skip for non-tmux."""
+        """Set up the live display.
+
+        - Inside tmux: open a dedicated monitor pane (separate process).
+        - Native TTY (no tmux): an inline ``rich.live`` display on stderr.
+        - Non-TTY (piped / CI / tests): no live display; summary only.
+
+        A metrics file + writer thread are always created (used by the tmux
+        pane, and cheap otherwise).
+        """
         # Always create a metrics file for the tmux display
         fd, self._metrics_file = tempfile.mkstemp(
             suffix=".json", prefix="fin3-monitor-", dir="/tmp",
@@ -222,6 +237,26 @@ class ResourceTracker:
 
         if is_in_tmux():
             self._pane_id = create_monitor_pane(self._metrics_file)
+        elif self._is_tty:
+            # Native terminal without tmux: render an inline live panel on
+            # stderr. redirect_stderr routes structlog JSON lines above the
+            # bar so they interleave cleanly instead of corrupting the redraw.
+            initial = render_live_panel(
+                SampledMetrics(baseline_rss_bytes=self._sampler.baseline_rss),
+                0.0,
+                "initialising...",
+                self._symbols,
+                self._resolution.value,
+            )
+            self._live = Live(
+                initial,
+                console=self._console,
+                refresh_per_second=2,
+                transient=False,
+                redirect_stdout=False,
+                redirect_stderr=True,
+            )
+            self._live.start()
 
         # Start writer thread regardless — logs structured metrics too
         self._writer_thread = threading.Thread(
@@ -284,6 +319,26 @@ class ResourceTracker:
                 json.dump(data, f)
         except OSError:
             pass
+
+        # Inline live display (native TTY): refresh the panel.
+        if self._live is not None:
+            try:
+                live_metrics = SampledMetrics(
+                    peak_rss_bytes=self._sampler.peak_rss,
+                    baseline_rss_bytes=self._sampler.baseline_rss,
+                    network_bytes=self._byte_counter.total_bytes,
+                    fetch_count=self._byte_counter.fetch_count,
+                    disk_before_bytes=self._disk_before,
+                    disk_after_bytes=self._disk_before,
+                )
+                self._live.update(
+                    render_live_panel(
+                        live_metrics, elapsed, self._phase,
+                        self._symbols, self._resolution.value,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - display must not crash the run
+                logger.warning("monitor.live_update_failed", error=str(exc))
 
     def _write_metrics(self, metrics: SampledMetrics, done: bool) -> None:
         """Write final metrics to the shared file."""

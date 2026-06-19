@@ -400,3 +400,55 @@ class TestResourceTracker:
             tracker.set_rows(999)
             assert tracker._phase == "custom phase"
             assert tracker._rows == 999
+
+    def test_inline_live_display_created_on_tty(self, storage) -> None:
+        """On a TTY without tmux, an inline rich.live display is created."""
+        from io import StringIO
+
+        from rich.console import Console as RichConsole
+
+        provider = MagicMock()
+        provider.fetch = MagicMock(return_value=pd.DataFrame())
+
+        tracker = ResourceTracker(
+            storage=storage,
+            provider=provider,
+            library="test-lib",
+            symbols=["AAPL"],
+            resolution=Resolution.ONE_MINUTE,
+        )
+        # Force the TTY path and redirect rendering to a buffer so the test
+        # runs without a real terminal.
+        buf = StringIO()
+        tracker._is_tty = True
+        tracker._console = RichConsole(file=buf, force_terminal=True, width=80)
+
+        with tracker:
+            # While inside the context, the inline live display must be active.
+            assert tracker._live is not None
+            time.sleep(0.7)  # let the writer thread refresh the live panel
+
+        # After exit, the live display is stopped and cleared.
+        assert tracker._live is None
+        output = buf.getvalue()
+        assert "fin3" in output  # panel title rendered at least once
+
+    def test_no_live_display_when_not_a_tty(self, storage, monkeypatch) -> None:
+        """Non-TTY (piped/CI) must not start a live display; summary only."""
+        provider = MagicMock()
+        provider.fetch = MagicMock(return_value=pd.DataFrame())
+
+        tracker = ResourceTracker(
+            storage=storage,
+            provider=provider,
+            library="test-lib",
+            symbols=["AAPL"],
+            resolution=Resolution.ONE_MINUTE,
+        )
+        tracker._is_tty = False
+        # Also ensure not detected as tmux
+        monkeypatch.delenv("TMUX", raising=False)
+
+        with tracker:
+            assert tracker._live is None
+            assert tracker._pane_id is None

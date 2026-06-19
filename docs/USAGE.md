@@ -269,10 +269,29 @@ of the window during the operation, showing real-time resource usage:
 The pane closes automatically when the operation finishes, and a final summary
 is printed to the main pane.
 
-### Outside tmux
+### Native terminal (no tmux)
 
-When not in tmux, a summary panel is printed to stderr after the operation
-completes:
+In a regular terminal (TTY) without tmux, a **live, inline info bar** renders
+on stderr and updates in place during the operation — the same panel as the
+tmux mode. Structured log lines scroll above the bar without corrupting it:
+
+```
+{"event": "core.gap_filled", "symbol": "AAPL", ...}
+╭─────────────────────────── fin3 monitor ───────────────────────────╮
+│  Symbols     AAPL, MSFT         Duration    42.3s                   │
+│  Resolution  1m                 Memory      842.0 MB peak           │
+│  Disk        +128.4 MB          Net         512.0 MB (5 fetches)    │
+│  Phase       fetching MSFT...                                     │
+╰────────────────────────────────────────────────────────────────────╯
+```
+
+On completion the live bar is replaced by the final summary panel.
+
+### Piped / CI output
+
+When stderr is not a TTY (piped, redirected, or CI), no live display is
+shown — only the final summary is printed to stderr, so stdout remains clean
+for piping:
 
 ```
 ╭─ fin3 resource summary ───────────────────────────────────────╮
@@ -283,8 +302,6 @@ completes:
 │  Net:    512.0 MB downloaded (5 fetches)                      │
 ╰───────────────────────────────────────────────────────────────╯
 ```
-
-Piped/CI output: the summary goes to stderr so stdout remains clean for piping.
 
 ### Programmatic Usage
 
