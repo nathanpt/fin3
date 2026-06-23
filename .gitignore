@@ -14,3 +14,11 @@ wheels/
 
 # Scraped docs
 docs/arcticdb_docs/
+
+# Local / internal tooling & process artifacts
+.factory/
+.hermes/
+docs/handoffs/
+qa-results/
+package-lock.json
+scripts/.bulk_download.log
