@@ -103,6 +103,21 @@ class ResourceTracker:
         symbols: list[str],
         resolution: Resolution,
     ) -> None:
+        """Initialise the resource tracker.
+
+        Parameters
+        ----------
+        storage : ArcticStorage
+            Storage backend for disk-size measurements.
+        provider : DataProvider
+            Provider instance (wrapped for byte counting).
+        library : str
+            Library/bucket name.
+        symbols : list[str]
+            Symbols being tracked.
+        resolution : Resolution
+            Bar resolution.
+        """
         self._storage = storage
         self._provider = provider
         self._library = library
@@ -142,6 +157,7 @@ class ResourceTracker:
         self._rows = rows
 
     def __enter__(self) -> ResourceTracker:
+        """Enter the context manager: start monitoring."""
         self._start_time = time.monotonic()
 
         # Baseline disk sizes for the affected symbols only (cheap).
@@ -166,6 +182,7 @@ class ResourceTracker:
         return self
 
     def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        """Exit the context manager: finalise metrics, render summary."""
         self._end_time = time.monotonic()
 
         # Stop memory sampling

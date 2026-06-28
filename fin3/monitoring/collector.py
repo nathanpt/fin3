@@ -36,10 +36,12 @@ class SampledMetrics:
 
     @property
     def rss_delta_bytes(self) -> int:
+        """Peak RSS increase over baseline (bytes)."""
         return max(0, self.peak_rss_bytes - self.baseline_rss_bytes)
 
     @property
     def disk_delta_bytes(self) -> int:
+        """Net disk space change for the tracked symbols (bytes)."""
         return self.disk_after_bytes - self.disk_before_bytes
 
 
@@ -64,14 +66,16 @@ class RSSSampler:
 
     @property
     def peak_rss(self) -> int:
+        """Highest RSS observed during sampling (bytes)."""
         return self._peak_rss
 
     @property
     def baseline_rss(self) -> int:
+        """RSS at the time ``start()`` was called (bytes)."""
         return self._baseline_rss
 
     def start(self) -> None:
-        self._baseline_rss = psutil.Process().memory_info().rss
+        """Begin sampling RSS in a background daemon thread."""
         self._peak_rss = self._baseline_rss
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -87,6 +91,7 @@ class RSSSampler:
                 pass
 
     def stop(self) -> None:
+        """Stop sampling and record one final RSS reading."""
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=self._interval * 2)
@@ -110,10 +115,12 @@ class ByteCounter:
 
     @property
     def total_bytes(self) -> int:
+        """Total bytes recorded across all fetched DataFrames."""
         return self._total_bytes
 
     @property
     def fetch_count(self) -> int:
+        """Number of provider fetch calls recorded."""
         return self._fetch_count
 
     def add(self, df: pd.DataFrame) -> None:
@@ -126,6 +133,7 @@ class ByteCounter:
             self._fetch_count += 1
 
     def reset(self) -> None:
+        """Reset all counters to zero."""
         with self._lock:
             self._total_bytes = 0
             self._fetch_count = 0

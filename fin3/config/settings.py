@@ -9,6 +9,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class MinioConfig(BaseModel):
+    """MinIO / S3-compatible storage connection settings.
+
+    Controls how fin3 connects to ArcticDB's storage backend. Supports
+    both single-bucket and per-library-bucket layouts.
+    """
+
     endpoint: str
     access_key: str
     secret_key: str
@@ -20,6 +26,12 @@ class MinioConfig(BaseModel):
 
 
 class DatabentoConfig(BaseModel):
+    """Databento API connection settings.
+
+    Controls dataset selection (e.g. XNAS.ITCH, ARCX.PILLAR), retry policy,
+    and API authentication for the Databento provider.
+    """
+
     provider_type: Literal["databento"] = "databento"
     api_key: str
     dataset: str = "XNAS.ITCH"
@@ -29,11 +41,21 @@ class DatabentoConfig(BaseModel):
 
 
 class PolygonConfig(BaseModel):
+    """Polygon.io API connection settings.
+
+    Configures authentication for Polygon's REST API (aggs/bars endpoint).
+    """
+
     provider_type: Literal["polygon"] = "polygon"
     api_key: str
 
 
 class BinanceConfig(BaseModel):
+    """Binance API connection settings.
+
+    Configures authentication for Binance's spot market API (klines endpoint).
+    """
+
     provider_type: Literal["binance"] = "binance"
     api_key: str
     api_secret: str = ""
@@ -43,6 +65,10 @@ ProviderConfig = Annotated[
     DatabentoConfig | PolygonConfig | BinanceConfig,
     Field(discriminator="provider_type"),
 ]
+"""Discriminated union of all supported provider config models.
+
+``provider_type`` field determines which model is used at deserialisation.
+"""
 
 
 class LockConfig(BaseModel):
@@ -61,6 +87,25 @@ class LockConfig(BaseModel):
 
 
 class ClientConfig(BaseSettings):
+    """Top-level client configuration.
+
+    Loaded from ``.env`` or environment variables with ``FIN3_`` prefix.
+    Nested fields use ``__`` delimiter (e.g. ``FIN3_MINIO__ENDPOINT``).
+
+    Parameters
+    ----------
+    minio : MinioConfig
+        MinIO / S3 connection settings.
+    providers : dict[str, ProviderConfig]
+        Mapping of provider name to its config model.
+    log_level : str
+        Logging level (``INFO``, ``DEBUG``, etc.).
+    log_format : str
+        ``"json"`` for structured JSON or ``"console"`` for human-readable.
+    lock : LockConfig
+        Cross-process locking configuration.
+    """
+
     minio: MinioConfig
     providers: dict[str, ProviderConfig] = {}
     log_level: str = "INFO"

@@ -1,0 +1,92 @@
+# yaml-language-server: $schema=https://squidfunk.github.io/mkdocs-material/schema.json
+
+site_name: fin3
+site_description: Declarative financial time-series data fetching, storage, and retrieval
+repo_url: https://github.com/nathanpt/fin3
+repo_name: nathanpt/fin3
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+
+# Exclude scraped external reference docs from the site build
+exclude_docs: |
+  /arcticdb_docs/
+  /databento/
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: true
+            show_bases: true
+            show_root_heading: true
+            show_root_full_path: false
+            heading_level: 3
+            docstring_style: google
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Usage Guide: USAGE.md
+  - Design: DESIGN.md
+  - Roadmap: ROADMAP.md
+  - Dataset Comparison: dataset-comparison.md
+  - Resource Monitoring Notes: resource-monitoring-notes.md
+  - API Reference:
+      - Overview: api/index.md
+      - MarketDataFetcher: api/core.md
+      - Schemas: api/schemas.md
+      - Exceptions: api/exceptions.md
+      - Providers: api/providers.md
+      - Storage: api/storage.md
+      - Configuration: api/config.md
+      - Validation & Integrity: api/validation.md
+      - Metadata: api/metadata.md
+      - Calendar: api/calendar.md
+      - Inspection: api/inspect.md
+      - Monitoring: api/monitoring.md
+      - Utilities: api/utilities.md

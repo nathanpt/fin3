@@ -44,10 +44,18 @@ class IntegrityReport:
 
     @property
     def is_clean(self) -> bool:
+        """True when no integrity issues were found."""
         return len(self.issues) == 0
 
     @property
     def summary(self) -> dict[str, int]:
+        """Return issue counts grouped by category.
+
+        Returns
+        -------
+        dict[str, int]
+            Mapping of category name to count of issues in that category.
+        """
         return _summarize(self.issues)
 
 

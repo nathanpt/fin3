@@ -183,6 +183,17 @@ class SymbolLock:
         timeout_s: float = 600.0,
         poll_interval_s: float = 0.5,
     ) -> None:
+        """Initialise the lock manager.
+
+        Parameters
+        ----------
+        lock_dir : str
+            Directory on the local filesystem where lock files are stored.
+        timeout_s : float
+            Maximum time to wait for a contended lock before raising.
+        poll_interval_s : float
+            Polling interval while waiting for a lock.
+        """
         self._lock_dir = lock_dir
         self._timeout_s = timeout_s
         self._poll_interval_s = poll_interval_s

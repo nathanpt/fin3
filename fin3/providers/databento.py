@@ -36,6 +36,18 @@ class DatabentoProvider(DataProvider):
     _max_backoff: float = 30.0
 
     def __init__(self, config: DatabentoConfig) -> None:
+        """Initialise the Databento provider.
+
+        Parameters
+        ----------
+        config : DatabentoConfig
+            Databento API configuration including API key, dataset, and retry policy.
+
+        Raises
+        ------
+        ProviderError
+            If the Databento client fails to initialise.
+        """
         try:
             import databento as db
 
@@ -69,6 +81,39 @@ class DatabentoProvider(DataProvider):
         asset_type: AssetType | None = None,
         **kwargs: object,
     ) -> pd.DataFrame:
+        """Fetch OHLCV data from Databento for a single symbol.
+
+        Uses Databento's ``timeseries.get_range()`` with retry/backoff
+        for rate limits and timeouts. Returns an empty DataFrame with the
+        canonical schema when no data exists for the range.
+
+        Parameters
+        ----------
+        symbol : str
+            Ticker symbol (e.g. ``AAPL``).
+        start : datetime
+            Start of the range (UTC).
+        end : datetime
+            End of the range (UTC).
+        resolution : Resolution
+            Bar resolution.
+        asset_type : AssetType or None
+            Optional asset type for provider-specific routing.
+
+        Returns
+        -------
+        pd.DataFrame
+            OHLCV DataFrame with UTC DatetimeIndex.
+
+        Raises
+        ------
+        ProviderError
+            On unexpected API errors.
+        ProviderRateLimitError
+            If rate-limited after exhausting retries.
+        ProviderTimeoutError
+            If the request times out after exhausting retries.
+        """
         schema = _RESOLUTION_TO_SCHEMA.get(resolution)
         if schema is None:
             raise ProviderError(f"Unsupported resolution {resolution} for Databento")

@@ -8,6 +8,20 @@ import structlog
 
 
 def configure_logging(level: str = "INFO", format_: str = "json") -> None:
+    """Configure structlog for the fin3 library.
+
+    Sets up structured logging with JSON or console output, timestamps,
+    and context injection. Called automatically by ``MarketDataFetcher``
+    on initialisation.
+
+    Parameters
+    ----------
+    level : str
+        Logging level (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``).
+    format_ : str
+        Output format: ``\"json\"`` for structured JSON (production) or
+        ``\"console\"`` for human-readable (development).
+    """
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,

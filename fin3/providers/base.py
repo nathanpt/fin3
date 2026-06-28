@@ -15,6 +15,12 @@ if TYPE_CHECKING:
 
 
 class DataProvider(ABC):
+    """Abstract base class for market data providers.
+
+    Subclasses implement ``fetch()`` to return OHLCV DataFrames with a UTC
+    DatetimeIndex and columns matching ``OHLCV_COLUMNS``. Providers are
+    registered with the ``ProviderRegistry`` via the ``@register`` decorator.
+    """
     @abstractmethod
     def fetch(
         self,

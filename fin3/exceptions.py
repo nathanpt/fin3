@@ -48,7 +48,21 @@ class BoundaryMismatchError(DataValidationError):
         actual_start: object | None = None,
         actual_end: object | None = None,
     ) -> None:
-        super().__init__(message)
+        """Initialise a boundary mismatch error with debugging context.
+
+        Parameters
+        ----------
+        message : str
+            Human-readable error description.
+        expected_start : object or None
+            Expected start of the reindexed range.
+        expected_end : object or None
+            Expected end of the reindexed range.
+        actual_start : object or None
+            Actual start of the reindexed data index.
+        actual_end : object or None
+            Actual end of the reindexed data index.
+        """
         self.expected_start = expected_start
         self.expected_end = expected_end
         self.actual_start = actual_start
@@ -64,6 +78,16 @@ class CostLimitExceededError(Fin3Error):
         estimated_cost: float = 0.0,
         max_cost: float = 0.0,
     ) -> None:
-        super().__init__(message)
+        """Initialise a cost limit error with cost details.
+
+        Parameters
+        ----------
+        message : str
+            Human-readable error description.
+        estimated_cost : float
+            The estimated download cost that exceeded the limit.
+        max_cost : float
+            The configured maximum cost threshold.
+        """
         self.estimated_cost = estimated_cost
         self.max_cost = max_cost

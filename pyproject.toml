@@ -26,7 +26,12 @@ dev = [
 
 [dependency-groups]
 dev = [
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.7.6",
+    "mkdocstrings>=1.0.4",
+    "mkdocstrings-python>=2.0.5",
     "pandas-stubs>=3.0.0.260204",
+    "pymdown-extensions>=11.0",
     "types-pytz>=2026.2.0.20260518",
 ]
 

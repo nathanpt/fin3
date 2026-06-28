@@ -47,22 +47,27 @@ class DefragReport:
 
     @property
     def defragmented_count(self) -> int:
+        """Number of symbols that were successfully defragmented."""
         return sum(1 for r in self.results if r.status == "defragmented")
 
     @property
     def would_defrag_count(self) -> int:
+        """Number of symbols that would be defragmented (dry-run mode)."""
         return sum(1 for r in self.results if r.status == "would_defrag")
 
     @property
     def failed_count(self) -> int:
+        """Number of symbols where defragmentation failed."""
         return sum(1 for r in self.results if r.status == "failed")
 
     @property
     def skipped_count(self) -> int:
+        """Number of symbols that were already defragmented (no action needed)."""
         return sum(1 for r in self.results if r.status == "ok")
 
     @property
     def missing_count(self) -> int:
+        """Number of symbols that were not found in the library."""
         return sum(1 for r in self.results if r.status == "missing")
 
 

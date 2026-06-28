@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from fin3.calendar.exchange import CalendarStrategy
 
 OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
+"""Tuple of canonical OHLCV column names used throughout fin3."""
 
 
 def empty_ohlcv() -> pd.DataFrame:
@@ -23,12 +24,24 @@ def empty_ohlcv() -> pd.DataFrame:
 
 
 class AssetType(str, Enum):
+    """Financial asset type used for calendar selection and schema routing.
+
+    Each asset type maps to a calendar strategy (NYSE, CME, or 24/7 continuous)
+    and a MIC code used for exchange-calendar alignment.
+    """
+
     EQUITY_US = "equity_us"
     CRYPTO = "crypto"
     FUTURES = "futures"
 
     @property
     def calendar_strategy(self) -> CalendarStrategy:
+        """Return the appropriate calendar strategy for this asset type.
+
+        Returns an ``ExchangeCalendarStrategy`` for exchange-traded assets
+        (NYSE for equities, CME for futures) or a
+        ``ContinuousCalendarStrategy`` for crypto (24/7 trading).
+        """
         return _calendar_strategy(self)
 
     @property
@@ -56,6 +69,12 @@ def _calendar_strategy(asset_type: AssetType) -> CalendarStrategy:
 
 
 class Resolution(str, Enum):
+    """OHLCV bar resolution / aggregation interval.
+
+    Maps to timedelta aliases accepted by ``pandas.date_range``.
+    Used throughout fin3 for calendar grid generation and library naming.
+    """
+
     ONE_MINUTE = "1m"
     FIVE_MINUTE = "5m"
     FIFTEEN_MINUTE = "15m"
@@ -65,6 +84,7 @@ class Resolution(str, Enum):
 
     @property
     def timedelta_alias(self) -> str:
+        """Return the pandas-compatible timedelta alias (e.g. ``1min``, ``1h``, ``1D``)."""
         mapping: dict[Resolution, str] = {
             Resolution.ONE_MINUTE: "1min",
             Resolution.FIVE_MINUTE: "5min",
@@ -92,3 +112,4 @@ def library_name(asset_type: AssetType, resolution: Resolution, provider: str) -
 
 
 METADATA_LIBRARY = "fin3-metadata"
+"""Name of the ArcticDB library used for per-symbol lifecycle metadata."""

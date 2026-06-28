@@ -23,6 +23,13 @@ class MetadataStore:
     """Stores per-symbol lifecycle metadata in the ``fin3.metadata`` ArcticDB library."""
 
     def __init__(self, storage: Any) -> None:
+        """Initialise the metadata store.
+
+        Parameters
+        ----------
+        storage : ArcticStorage
+            Storage backend used to access the metadata ArcticDB library.
+        """
         self._storage = storage
 
     def get_lifecycle_bounds(self, symbol: str) -> dict[str, Any] | None:

@@ -103,6 +103,7 @@ def run(metrics_file: str) -> None:
 
 
 def main() -> None:
+    """Entry point for the standalone monitoring display process."""
     if len(sys.argv) < 2:
         print("Usage: python -m fin3.monitoring.display <metrics_file.json>", file=sys.stderr)
         sys.exit(1)

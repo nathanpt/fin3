@@ -11,9 +11,28 @@ if TYPE_CHECKING:
 
 
 class ProviderRegistry:
+    """Registry mapping provider names to their implementations.
+
+    Providers register themselves via the ``@ProviderRegistry.register(name)``
+    classmethod decorator. The registry instantiates providers on ``__init__``
+    using the configuration dict passed in.
+    """
+
     _PROVIDER_MAP: dict[str, type[Any]] = {}
 
     def __init__(self, configs: dict[str, Any]) -> None:
+        """Initialise provider instances from a name-to-config mapping.
+
+        Parameters
+        ----------
+        configs : dict[str, Any]
+            Mapping of provider name to its Pydantic config model.
+
+        Raises
+        ------
+        ConfigurationError
+            If a provider name is not registered.
+        """
         self._providers: dict[str, DataProvider] = {}
         for name, config in configs.items():
             if name not in self._PROVIDER_MAP:
@@ -23,6 +42,23 @@ class ProviderRegistry:
             self._providers[name] = self._PROVIDER_MAP[name](config)
 
     def get(self, name: str) -> DataProvider:
+        """Return a configured provider instance by name.
+
+        Parameters
+        ----------
+        name : str
+            Provider name as used in ``@ProviderRegistry.register(name)``.
+
+        Returns
+        -------
+        DataProvider
+            The configured provider instance.
+
+        Raises
+        ------
+        ConfigurationError
+            If the provider is not in the configured set.
+        """
         if name not in self._providers:
             raise ConfigurationError(
                 f"Provider '{name}' not configured. "

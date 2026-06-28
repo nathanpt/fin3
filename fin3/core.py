@@ -29,6 +29,16 @@ class MarketDataFetcher:
     """Orchestrates data fetching, storage, validation, and retrieval."""
 
     def __init__(self, config: ClientConfig) -> None:
+        """Initialise the fetcher with a client configuration.
+
+        Sets up structured logging, ArcticDB storage with locking, the
+        provider registry, and the metadata store.
+
+        Parameters
+        ----------
+        config : ClientConfig
+            Top-level configuration including MinIO, providers, lock, and logging settings.
+        """
         configure_logging(level=config.log_level, format_=config.log_format)
         self._config = config
         self._storage = ArcticStorage(config.minio, lock=config.lock)

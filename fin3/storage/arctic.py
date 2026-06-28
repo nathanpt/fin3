@@ -55,6 +55,16 @@ class ArcticStorage:
     """
 
     def __init__(self, config: MinioConfig, lock: LockConfig | None = None) -> None:
+        """Initialise the ArcticDB storage wrapper.
+
+        Parameters
+        ----------
+        config : MinioConfig
+            MinIO / S3 connection settings and bucket configuration.
+        lock : LockConfig or None
+            Cross-process locking configuration. Pass ``None`` or a config
+            with ``enabled=False`` to disable locking.
+        """
         self._config = config
         self._scheme = "s3s" if config.secure else "s3"
         self._host, _, self._port = config.endpoint.partition(":")
@@ -330,10 +340,36 @@ class ArcticStorage:
             logger.info("storage.delete", library=library, symbol=symbol)
 
     def list_symbols(self, library: str) -> list[str]:
+        """Return all symbols stored in a library.
+
+        Parameters
+        ----------
+        library : str
+            Library/bucket name (e.g. ``equities-1m-databento``).
+
+        Returns
+        -------
+        list[str]
+            Sorted list of symbol names.
+        """
         lib = self._get_or_create_library(library)
         return lib.list_symbols()  # type: ignore[no-any-return]
 
     def has_symbol(self, library: str, symbol: str) -> bool:
+        """Check whether a symbol exists in a library.
+
+        Parameters
+        ----------
+        library : str
+            Library/bucket name.
+        symbol : str
+            Symbol ticker (e.g. ``AAPL``).
+
+        Returns
+        -------
+        bool
+            True if the symbol has stored data in the library.
+        """
         lib = self._get_or_create_library(library)
         try:
             with _suppress_blockmanager_warning():
