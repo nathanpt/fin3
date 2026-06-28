@@ -206,8 +206,6 @@ The project ships several standalone scripts under `scripts/`. A unified `fin3` 
 | Document | Contents |
 |---|---|
 | [docs/USAGE.md](docs/USAGE.md) | Full usage guide: install, config, fetching data, crypto, futures, concurrency, monitoring, exception handling, adding providers |
-| [docs/DESIGN.md](docs/DESIGN.md) | Architecture overview: requirements, data flow, component design, testing strategy |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Development roadmap with completed/planned features |
 | [docs/dataset-comparison.md](docs/dataset-comparison.md) | Databento dataset cost analysis (XNAS.ITCH vs ARCX.PILLAR vs ...) |
 | [docs/resource-monitoring-notes.md](docs/resource-monitoring-notes.md) | Resource monitoring implementation details and optimizations |
 
@@ -226,7 +224,7 @@ fin3 is **production-grade for its core path** (Databento equities/crypto/future
 
 **Under active development**: Polygon/Binance providers, declarative manifest system, high-level retrieval API, and unified CLI.
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the full picture, priority guidance, and what's coming next.
+The full roadmap (completed/planned features, priority guidance) lives in the internal `.docs/ROADMAP.md` and is intentionally not published.
 
 ---
 

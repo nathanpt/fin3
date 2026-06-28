@@ -72,8 +72,6 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Usage Guide: USAGE.md
-  - Design: DESIGN.md
-  - Roadmap: ROADMAP.md
   - Dataset Comparison: dataset-comparison.md
   - Resource Monitoring Notes: resource-monitoring-notes.md
   - API Reference:

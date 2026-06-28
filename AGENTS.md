@@ -97,7 +97,7 @@ When working in this repository, you must strictly adhere to the following rules
 
 - Write clear, descriptive commit messages in imperative mood (e.g. "Add gap detection for multi-symbol queries")
 - Keep PRs focused on a single concern
-- Link PRs to relevant design decisions in `docs/DESIGN.md`
+- Link PRs to relevant design decisions in `.docs/DESIGN.md` (internal, not published)
 
 ## Architecture Notes
 

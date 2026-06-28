@@ -21,6 +21,7 @@ docs/arcticdb_docs/
 # Local / internal tooling & process artifacts
 .factory/
 .hermes/
+.docs/
 docs/handoffs/
 qa-results/
 package-lock.json

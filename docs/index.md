@@ -26,8 +26,6 @@ df = fetcher.get_data(
 
 - [Usage Guide](USAGE.md) — install, configure, fetch data, concurrency, monitoring
 - [API Reference](api/index.md) — full API documentation
-- [Design Document](DESIGN.md) — architecture and data flow
-- [Roadmap](ROADMAP.md) — current status and planned features
 
 ## Features
 

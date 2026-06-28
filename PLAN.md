@@ -10,7 +10,7 @@ When two processes call `get_data("AAPL", ...)` concurrently:
 3. Both call `ArcticStorage.update(...)` (`fin3/storage/arctic.py:266`).
 4. Because every write hardcodes `prune_previous_versions=True` (lines 261, 282,
    384), the second write clobbers the first with **no rollback**. Recovery
-   requires a MinIO infrastructure-level snapshot (`docs/DESIGN.md:690`).
+   requires a MinIO infrastructure-level snapshot (`.docs/DESIGN.md:690`).
 
 Today there is **zero** concurrency protection on the data path (the only locks
 in the repo are in the unrelated `fin3/monitoring/` resource counters). This
@@ -71,8 +71,8 @@ any lock-file I/O if needed.
 | `tests/test_core.py` | Assert `_ensure_symbol` acquires the lock (spy/mock). |
 | `tests/test_storage.py` | Assert `delete_symbol`/`defragment_symbol` acquire the lock. |
 | `tests/integration/test_concurrency.py` *(new)* | Real cross-process double-fetch prevention (gated by `-m integration`). |
-| `docs/ROADMAP.md` | Mark "Concurrent access protection" item complete. |
-| `docs/USAGE.md` / `docs/DESIGN.md` | Document the locking behavior + config. |
+| `.docs/ROADMAP.md` | Mark "Concurrent access protection" item complete. |
+| `docs/USAGE.md` / `.docs/DESIGN.md` | Document the locking behavior + config. |
 
 ## Reuse
 
@@ -150,8 +150,8 @@ isolated worktree. Waves run where dependencies allow parallelism.
     occurs and the result is correct. Use `os.getpid()`-based library naming
     (avoid the non-multiprocess-safe `_lib_counter`, `integration/conftest.py:117`).
     Inherits the `-m integration` env-gated skip automatically.
-  - Update `docs/ROADMAP.md` (check off the item), `docs/USAGE.md`,
-    `docs/DESIGN.md` Section 10 with the locking behavior + config env vars.
+  - Update `.docs/ROADMAP.md` (check off the item), `docs/USAGE.md`,
+    `.docs/DESIGN.md` Section 10 with the locking behavior + config env vars.
 - *Depends on:* Step 3 merged.
 
 ## Verification
