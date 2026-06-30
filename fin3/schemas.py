@@ -100,11 +100,11 @@ def library_name(asset_type: AssetType, resolution: Resolution, provider: str) -
     """Build the ArcticDB library/bucket name: ``{asset_type}-{resolution}-{provider}``.
 
     Convention matches existing MinIO buckets: ``equities-1m-databento``,
-    ``crypto-tick-databento``, etc.
+    ``crypto-1m-binance``, etc.
     """
     _ASSET_PREFIX: dict[AssetType, str] = {
         AssetType.EQUITY_US: "equities",
-        AssetType.CRYPTO: "crypto-tick",
+        AssetType.CRYPTO: "crypto",
         AssetType.FUTURES: "futures",
     }
     prefix = _ASSET_PREFIX.get(asset_type, asset_type.value)

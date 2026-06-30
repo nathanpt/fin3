@@ -10,7 +10,7 @@ class TestLibraryName:
         assert library_name(AssetType.EQUITY_US, Resolution.ONE_MINUTE, "databento") == "equities-1m-databento"
 
     def test_crypto(self) -> None:
-        assert library_name(AssetType.CRYPTO, Resolution.ONE_HOUR, "binance") == "crypto-tick-1h-binance"
+        assert library_name(AssetType.CRYPTO, Resolution.ONE_HOUR, "binance") == "crypto-1h-binance"
 
     def test_futures(self) -> None:
         assert library_name(AssetType.FUTURES, Resolution.ONE_DAY, "databento") == "futures-1d-databento"
