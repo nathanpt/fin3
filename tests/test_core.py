@@ -287,7 +287,7 @@ class TestEmptyDataGuard:
 
         assert isinstance(result, pd.DataFrame)
         # Should NOT have stored anything for this symbol
-        assert not lmdb_storage.has_symbol("crypto-tick-1h-databento", "FAKESYMBOL")
+        assert not lmdb_storage.has_symbol("crypto-1h-databento", "FAKESYMBOL")
 
     def test_empty_data_existing_symbol_still_updated(
         self, lmdb_storage: ArcticStorage
@@ -318,7 +318,7 @@ class TestEmptyDataGuard:
             end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
         )
 
-        assert lmdb_storage.has_symbol("crypto-tick-1h-databento", "BTC-USD")
+        assert lmdb_storage.has_symbol("crypto-1h-databento", "BTC-USD")
 
         # Phase 2: request day 2 — bootstrap returns cached metadata (no fetch),
         # gap fill returns empty data, but symbol already exists so null grid is stored
@@ -335,7 +335,7 @@ class TestEmptyDataGuard:
 
         assert isinstance(result, pd.DataFrame)
         # Symbol should still exist in storage (not removed)
-        assert lmdb_storage.has_symbol("crypto-tick-1h-databento", "BTC-USD")
+        assert lmdb_storage.has_symbol("crypto-1h-databento", "BTC-USD")
 
 
 class TestSymbolLocking:
@@ -373,7 +373,7 @@ class TestSymbolLocking:
             end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
         )
 
-        lib_name = "crypto-tick-1h-databento"
+        lib_name = "crypto-1h-databento"
         # One acquisition per symbol, each keyed by its (library, symbol) pair.
         assert spy.call_count == 2
         spy.assert_any_call(lib_name, "BTC-USD")
