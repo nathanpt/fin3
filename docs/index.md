@@ -155,10 +155,11 @@ Built on [ArcticDB](https://arcticdb.io/) + [MinIO](https://min.io/)
 
     [:octicons-arrow-right-24: Open](api/index.md)
 
-- :material-chart-line: **Dataset Comparison**
+- :material-chart-line: **Data Sources**
 
     ---
 
+    Provider comparison (Databento, Massive, Yahoo, Binance) plus the
     Databento dataset cost analysis: XNAS.ITCH vs ARCX.PILLAR vs XNAS.BASIC
     vs EQUS.SUMMARY.
 
