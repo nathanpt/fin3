@@ -25,7 +25,7 @@ class TestProviderRegistry:
         config = DatabentoConfig(api_key="test_key")
         registry = ProviderRegistry({"databento": config})
         with pytest.raises(ConfigurationError, match="not configured"):
-            registry.get("polygon")
+            registry.get("massive")
 
     def test_unknown_provider_name_at_init_raises(self) -> None:
         """Passing an unregistered provider name at init raises ConfigurationError."""

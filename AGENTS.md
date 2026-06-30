@@ -15,7 +15,7 @@ fin3/
 ├── calendar/
 │   └── exchange.py          # CalendarStrategy protocol, ExchangeCalendarStrategy, ContinuousCalendarStrategy
 ├── config/
-│   └── settings.py          # MinioConfig, DatabentoConfig, PolygonConfig, BinanceConfig, ClientConfig
+│   └── settings.py          # MinioConfig, DatabentoConfig, MassiveConfig, BinanceConfig, YahooConfig, ClientConfig
 ├── metadata/
 │   └── asset_profile.py     # MetadataStore (IPO/delist date bootstrap with 3-tier fallback)
 ├── providers/

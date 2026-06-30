@@ -1,169 +1,274 @@
-# Concurrent Access Protection
+# Massive Provider (formerly Polygon.io)
 
 ## Context
 
-fin3's `MarketDataFetcher.get_data()` has a documented **check-then-act race**.
-When two processes call `get_data("AAPL", ...)` concurrently:
+fin3's roadmap declares **provider breadth the live priority** now that the
+MkDocs site has shipped (`docs/`). Binance ✓ (crypto) and Yahoo ✓ (free
+equities) are done; **Massive** (the 2025-10-30 rebrand of Polygon.io) and
+ThetaData remain to round out the multi-provider promise.
 
-1. Both run `_symbol_gaps()` (`fin3/core.py:176`) and detect the **same gap**.
-2. Both `provider.fetch(...)` the same data (wasted API cost).
-3. Both call `ArcticStorage.update(...)` (`fin3/storage/arctic.py:266`).
-4. Because every write hardcodes `prune_previous_versions=True` (lines 261, 282,
-   384), the second write clobbers the first with **no rollback**. Recovery
-   requires a MinIO infrastructure-level snapshot (`.docs/DESIGN.md:690`).
+Three things make this the right story *today*:
 
-Today there is **zero** concurrency protection on the data path (the only locks
-in the repo are in the unrelated `fin3/monitoring/` resource counters). This
-feature adds cross-process mutual exclusion scoped per `(library, symbol)` so
-that concurrent calls serialize per-symbol without blocking unrelated symbols.
+1. **There is no provider yet, only a stale stub.** `PolygonConfig` exists at
+   `fin3/config/settings.py:43` but is a 4-line placeholder (`api_key` only) —
+   there is no `MassiveProvider`, no tests, no registry entry, and no docs.
+2. **The rebrand is mid-transition and time-sensitive.** Per the roadmap, build
+   against `massive` / `api.massive.com`; the legacy `polygon` / `api.polygon.io`
+   names are deprecated. Since there are **no production users** of the stub
+   yet, this is the closing window for a clean rename (`PolygonConfig` →
+   `MassiveConfig`, key `"polygon"` → `"massive"`) instead of a
+   backward-compat shim that would then live forever.
+3. **A proven template exists.** `BinanceProvider` (`fin3/providers/binance.py`)
+   is a fully-tested stdlib-HTTP REST provider with pagination, rate-limit
+   backoff, cost, and lifecycle bounds — Massive mirrors it almost directly.
 
-**Trigger / deployment model:** the library runs on a **single shared dev
-server** where multiple processes may call `get_data()` simultaneously. This is
-the assumed deployment, which informs the locking choice below.
+The goal is a single-branch, single-headline release: *"Add the Massive
+(formerly Polygon) provider for paid US-equity OHLCV."*
 
 ## Approach
 
-**File-based advisory locks via `fcntl.flock`, scoped per `(library, symbol)`.**
+**A stdlib-HTTP REST provider wrapping Massive's aggregates endpoint, mirroring
+the `BinanceProvider` pattern, with a `PolygonConfig → MassiveConfig` rename.**
 
-- `flock(LOCK_EX)` provides cross-process mutual exclusion on the same host and
-  **auto-releases on process exit/crash** — a crashed process never leaves a
-  stale lock, so no recovery/repair path is needed. This is the decisive
-  advantage over homegrown MinIO-metadata locks.
-- Stdlib only (`fcntl`, `os`, `time`, `threading`) — **no new dependencies**
-  (keeps `AGENTS.md`'s "no dep changes without sign-off" rule satisfied).
-- Lock granularity = `(library, symbol)`. Two processes fetching **different**
-  symbols never block each other; only same-symbol contention serializes.
-- **No reentrancy required.** Verified: `_ensure_symbol` acquires → fills gaps →
-  releases *before* the separate `defrag` loop runs (`core.py:86-88`). So
-  `defragment_symbol` / `delete_symbol` can acquire their own non-nested lock.
+- **HTTP via `urllib.request` (stdlib only).** There is no `requests`/`httpx`
+  anywhere in `fin3/` today — Binance uses `urllib.request` + `urllib.error`.
+  Following the same keeps the install lean and satisfies AGENTS.md's "no dep
+  changes without explicit user authorization" rule. **No new dependency, no new
+  optional extra.** (Unlike `databento`/`yfinance`, which wrap a PyPI SDK and
+  ship as `fin3[databento]`/`fin3[yfinance]`, Massive v1 uses plain REST — so
+  `pyproject.toml` is untouched.)
+- **Endpoint:** `GET /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}`
+  with `adjusted`, `sort`, `limit`, and `apiKey` query params. US equities v1
+  scope only (options/forex/futures/crypto out of scope — crypto is Binance's).
+- **Resolution mapping → `(multiplier, timespan)`:** `1m→1×minute`,
+  `5m→5×minute`, `15m→15×minute`, `1h→1×hour`, `1d→1×day`, and — unlike Yahoo —
+  **`4h→4×hour` natively** (Massive supports an arbitrary multiplier), so **no
+  `_aggregate_bars` fallback is needed**.
+- **Raw-default price basis.** `adjusted=false` default for parity with
+  Databento and fin3's store-raw-canonical philosophy (matches Yahoo's
+  `auto_adjust=False`); toggle via config for split/dividend-adjusted OHLC.
+- **Timestamps in milliseconds.** Massive's aggs `results[].t` is a **Unix
+  epoch in milliseconds**, not seconds. *(Correction: the ROADMAP note says
+  "Unix seconds, UTC" — that is inaccurate for the aggs endpoint and would
+  produce 1970-era dates. Normalise with `pd.to_datetime(..., unit="ms",
+  utc=True)`, exactly as Binance does.)*
+- **Cursor-based pagination via `next_url`.** Unlike Binance (which advances a
+  `startTime` cursor), Massive returns a `next_url` field when more pages
+  remain. Page at `limit=50000` and follow `next_url` until it is absent. This
+  is the one structural divergence from the Binance template and must be
+  designed for explicitly (see "Pagination" below).
+- **Rate limiting & retry.** Same `_request` / `_request_with_retry` split as
+  Binance: 429 → `ProviderRateLimitError` (retried), socket timeout →
+  `ProviderTimeoutError` (retried), other HTTP errors → `ProviderError`
+  (fatal, not retried). Honor `Retry-After` when present. Cap via `max_retries`
+  / `initial_backoff` / `max_backoff` on `MassiveConfig`.
+- **Auth.** API key sent via the `apiKey` query parameter (the legacy
+  `Authorization: Bearer` header also works; query param is the documented
+  default and simplest). Paid subscription required for real data; a limited
+  free tier exists.
+- **Cost.** `estimate_cost()` returns `0.0` — Massive is subscription-based and
+  exposes no per-query cost. Document that `MarketDataFetcher`'s `max_cost`
+  ceiling is **not enforced** for this provider (it already handles this via
+  `hasattr(prov, "estimate_cost")` at `core.py:84` and sums cost at `core.py:260`).
+- **Lifecycle bounds.** `get_instrument_bounds()` probes the earliest daily agg
+  (`/range/1/day/1970-01-01/{today}` with `sort=asc&limit=1`) for the listing
+  date, mirroring Binance's first-kline probe. On any error or empty result,
+  return `{ipo_date: None, delist_date: None}` so the `MetadataStore`
+  3-tier bootstrap falls back to discovery.
+- **Calendar.** US equities → existing `ExchangeCalendarStrategy` (XNYS) via
+  `AssetType.EQUITY_US` (`schemas.py`). No new calendar work.
 
-**Why not the other roadmap options:**
-- *MinIO-metadata locks* — require adding a MinIO/S3 client dependency (none
-  exists today) and conditional-PUT dance; harder to test; no benefit on a
-  single host. File locks are strictly simpler here.
-- *ArcticDB staged writes* (`write(staged=True)` + `finalize_staged_data()`) —
-  these merge concurrent writes to a symbol but do **not** prevent the redundant
-  `provider.fetch()` (wasted cost), which is a core goal. Orthogonal; not chosen.
+**Why not the alternatives on the board** (full reasoning in the story memo):
+- *ThetaData (stocks-only)* — the roadmap itself recommends deferring;
+  stocks-only underuses ThetaData (options is its real value) and options don't
+  fit fin3's OHLCV schema (needs its own phase).
+- *Declarative manifest (Phase 5)* / *`DataManager` retrieval (Phase 6)* —
+  higher leverage but multi-slice stories that resist a clean one-day branch and
+  sit after provider completeness in the roadmap ordering.
 
-### Timeout & diagnostics
-Non-blocking `flock(LOCK_EX | LOCK_NB)` in a poll loop with a configurable
-`timeout`. On timeout, raise `LockAcquisitionError` whose message reports the
-holder's **PID, hostname, and lock-file path** (written to the lock file on
-acquire) so operators can identify a stuck holder. **Deadlock is structurally
-impossible** — each operation holds at most one lock at a time, so there are no
-circular waits.
+## Configurability
 
-### Configurability
-A new `LockConfig` (env prefix `FIN3_LOCK__`): `enabled` (default `True`),
-`lock_dir` (default `/tmp/fin3/locks`), `timeout_s` (default e.g. 600),
-`poll_interval_s` (default 0.5). Existing tests can set `enabled=False` to avoid
-any lock-file I/O if needed.
+A renamed config model (drop-in replacement for the `PolygonConfig` stub):
+
+```python
+class MassiveConfig(BaseModel):
+    provider_type: Literal["massive"] = "massive"
+    api_key: str
+    base_url: str = "https://api.polygon.io"  # see note
+    adjusted: bool = False            # raw-default for Databento parity
+    request_limit: int = 50000        # Massive's max page size
+    max_retries: int = 3
+    initial_backoff: float = 1.0
+    max_backoff: float = 60.0
+    timeout: float = 30.0
+```
+
+> **`base_url` default:** the roadmap says build against `api.massive.com`
+> (the new brand host) while `api.polygon.io` (the legacy host) runs in
+> parallel for an extended transition. Make `base_url` configurable so
+> operators can target either; default to the legacy `api.polygon.io` only if
+> the new host is not yet serving traffic at implementation time — otherwise
+> default to `https://api.massive.com`. **Verify which host is live before
+> setting the default** (this is a single `curl` check at implementation time).
+
+**`.env` migration:** `FIN3_PROVIDERS__POLYGON__API_KEY` →
+`FIN3_PROVIDERS__MASSIVE__API_KEY`. No production users exist, so no compat
+shim — update `.env` and any examples/docs in the same change.
+
+## Pagination
+
+Massive's aggs endpoint paginates **by cursor, not by time**:
+
+1. Request `/v2/aggs/ticker/{t}/range/{mult}/{ts}/{from}/{to}?limit=50000&sort=asc`.
+2. Response JSON includes `results` (a list) and, when more pages exist, a
+   `next_url` string (full URL of the next page, already carrying the cursor +
+   `apiKey`). When there are no more pages, `next_url` is absent.
+3. Follow `next_url` (GET) until it is absent or `results` is empty.
+4. Concatenate all `results`, dedupe on `t`, sort ascending.
+
+This differs from Binance's `startTime`-cursor loop and must be implemented as
+its own `_request_with_retry`-driven loop keyed on `next_url`. Guard against an
+unexpected non-advancing cursor (identical `next_url` twice → break).
 
 ## Files to modify
 
 | File | Change |
 |---|---|
-| `fin3/storage/locking.py` *(new)* | `SymbolLock` class + `LockAcquisitionError`. |
-| `fin3/config/settings.py` | `LockConfig` model; add `lock: LockConfig` to `ClientConfig`. |
-| `fin3/storage/arctic.py` | `ArcticStorage.__init__` accepts `lock: LockConfig`; expose `lock_symbol(library, symbol)` context manager; guard `delete_symbol` (288) + `defragment_symbol` (364). |
-| `fin3/core.py` | `MarketDataFetcher.__init__` passes `config.lock` to `ArcticStorage`; wrap `_ensure_symbol` body (273) in `with self._storage.lock_symbol(...):`. |
-| `tests/test_locking.py` *(new)* | Unit tests for the `SymbolLock` primitive (filesystem-only, no MinIO). |
-| `tests/test_core.py` | Assert `_ensure_symbol` acquires the lock (spy/mock). |
-| `tests/test_storage.py` | Assert `delete_symbol`/`defragment_symbol` acquire the lock. |
-| `tests/integration/test_concurrency.py` *(new)* | Real cross-process double-fetch prevention (gated by `-m integration`). |
-| `.docs/ROADMAP.md` | Mark "Concurrent access protection" item complete. |
-| `docs/USAGE.md` / `.docs/DESIGN.md` | Document the locking behavior + config. |
+| `fin3/config/settings.py` | Rename `PolygonConfig` → `MassiveConfig`; `provider_type` literal `"polygon"` → `"massive"`; add `base_url`, `adjusted`, `request_limit`, retry policy, `timeout`; update the `ProviderConfig` discriminated union (`settings.py:94`) to swap `PolygonConfig` for `MassiveConfig`. |
+| `fin3/providers/massive.py` *(new)* | `MassiveProvider(DataProvider)` with `fetch()`, `estimate_cost()`, `get_instrument_bounds()`, `_request()`, `_request_with_retry()`, `_normalise()`, resolution→`(multiplier,timespan)` map, cursor pagination. Registered via `@ProviderRegistry.register("massive")`. |
+| `fin3/providers/__init__.py` | Add `"massive"` to the `_register_builtin_providers()` import tuple (`providers/__init__.py`, currently `("databento", "binance", "yfinance")`). |
+| `tests/providers/test_massive.py` *(new)* | Mocked-HTTP unit tests mirroring `test_binance.py` (symbol passthrough, resolution mapping incl. native 4h, ms→UTC normalisation, cursor pagination, 429 retry/backoff, fatal-error no-retry, cost=0, instrument bounds success/empty/error, adjusted flag, config). |
+| `tests/test_config.py` | Assert `FIN3_PROVIDERS__MASSIVE__API_KEY` parses into a `MassiveConfig` with `provider_type="massive"`; update any existing `polygon` assertion. |
+| `tests/integration/test_massive_live.py` *(new, gated)* | Live smoke behind `-m integration` + `MASSIVE_API_KEY` env guard. Fetch AAPL daily; assert Stage-1 validation + OHLCV constraints pass. Skipped without key/marker. |
+| `.env` | Rename any `FIN3_PROVIDERS__POLYGON__...` key to `MASSIVE`. |
+| `docs/USAGE.md` | Add Massive provider section (config, raw-default, native 4h, cost-not-enforced caveat, Polygon rebrand note). |
+| `docs/dataset-comparison.md` | Add a Massive row to the provider comparison table. |
+| `docs/api/` (API reference) | Add `MassiveProvider` / `MassiveConfig` reference page. |
+| `.docs/ROADMAP.md` | Check off the "Massive Provider Implementation" item; note the ms-not-seconds timestamp correction. |
 
 ## Reuse
 
-- `ArcticStorage` (`fin3/storage/arctic.py:49`) — the shared collaborator both
-  `MarketDataFetcher` and mutators go through; natural home for `lock_symbol()`.
-- `library_name()` (`fin3/schemas.py:88`) — produces the library component of the
-  lock key, keeping lock keys consistent with storage keys.
-- `ClientConfig` / env-nesting pattern (`fin3/config/settings.py:53`) — reuse for
-  `LockConfig` so `FIN3_LOCK__TIMEOUT_S` etc. work automatically.
-- `tests/conftest.py:28` `storage` fixture (LMDB-backed) + `tests/test_core.py:19`
-  `_make_fetcher()` bypass pattern — for lock integration tests without MinIO.
-- `tests/integration/conftest.py:124` `unique_library` fixture — pattern for
-  per-test isolation in the new integration test.
+- `BinanceProvider` (`fin3/providers/binance.py`) — the structural template:
+  `_request`/`_request_with_retry`/`fetch`/`estimate_cost`/`get_instrument_bounds`
+  split, `ProviderRateLimitError`/`ProviderTimeoutError`/`ProviderError` usage,
+  `empty_ohlcv()` for empty ranges, `_normalise()` producing a UTC
+  `DatetimeIndex` canonical OHLCV DataFrame. Copy the shape; swap the
+  endpoint, pagination strategy (cursor vs startTime), and timestamp unit.
+- `DataProvider` abstract base (`fin3/providers/base.py`) — `fetch()` signature
+  + docstring contract (UTC `DatetimeIndex`, `OHLCV_COLUMNS`, empty-not-None).
+- `ProviderRegistry.register` (`fin3/providers/__init__.py`) — decorator
+  registration; `_register_builtin_providers()` auto-import on package init.
+- `Resolution` / `AssetType` / `OHLCV_COLUMNS` / `empty_ohlcv()` /
+  `library_name()` (`fin3/schemas.py`) — resolution→timespan mapping,
+  `EQUITY_US` → XNYS calendar, canonical columns, empty-frame factory.
+- `ProviderConfig` discriminated union + `ClientConfig.providers` dict
+  (`fin3/config/settings.py`) — env-nesting (`FIN3_PROVIDERS__MASSIVE__...`).
+- `tests/providers/test_binance.py` — test layout to mirror: `agg()` fixture
+  builder, `@patch("...MassiveProvider._request_with_retry")` mocking,
+  `TestSymbolMapping`/`TestNormalise`/`TestFetch`/`TestRetry`/`TestCost`/
+  `TestInstrumentBounds`/`TestConfig` class groupings.
+- `tests/integration/test_concurrency.py` — the `-m integration` env-gated skip
+  pattern to copy for the live smoke test.
 
 ## Implementation steps (sub-agent driven)
 
 This is a sub-agent driven implementation. Each step names the sub-agent's
 **contract** (inputs, outputs, dependencies) so it can be dispatched to an
-isolated worktree. Waves run where dependencies allow parallelism.
+isolated worktree. The config rename and provider are **sequenced, not
+parallel** — the provider imports `MassiveConfig`, so it depends on the renamed
+config landing first.
 
-### Wave 1 — foundation (parallel, 2 isolated worktrees)
+### Wave 1 — foundation
 
-**[ ] Step 1 — Agent A: `SymbolLock` primitive + unit tests**
-- *Contract:* Create `fin3/storage/locking.py` defining:
-  - `class LockAcquisitionError(RuntimeError)`.
-  - `class SymbolLock`: `__init__(self, lock_dir, timeout_s, poll_interval_s)`;
-    context-manager `acquire(library, symbol)` / `__enter__` / `__exit__` using
-    `fcntl.flock(LOCK_EX | LOCK_NB)` in a poll loop; writes `{pid}\n{hostname}\n`
-    to the lock file on acquire; raises `LockAcquisitionError(timeout, holder_pid,
-    hostname, path)` on timeout. Sanitize symbol names for filename safety
-    (replace `/`). Create `lock_dir` with `os.makedirs(..., exist_ok=True)`.
-    Unix-only (`fcntl`); guard the import so non-Unix import doesn't crash.
-- *Also:* write `tests/test_locking.py` — acquire/release, timeout raises, stale
-  lock auto-released when a child process exits, and same-symbol contention via
-  `multiprocessing` (worker tries to acquire while parent holds; asserts it waits
-  then succeeds on release). No MinIO needed (flock is pure filesystem).
+**[ ] Step 1 — Agent A: rename `PolygonConfig` → `MassiveConfig`**
+- *Contract:* In `fin3/config/settings.py`, rename `PolygonConfig` to
+  `MassiveConfig`; change `provider_type: Literal["polygon"]` →
+  `Literal["massive"]`; expand the model to `api_key`, `base_url`, `adjusted`
+  (default `False`), `request_limit` (default `50000`), `max_retries`,
+  `initial_backoff`, `max_backoff`, `timeout`; update the `ProviderConfig`
+  discriminated union to reference `MassiveConfig`; update the class docstring
+  (Polygon rebrand, raw-default, native 4h). Update `tests/test_config.py` to
+  parse `FIN3_PROVIDERS__MASSIVE__API_KEY` and assert `provider_type="massive"`;
+  remove/replace any `polygon` assertion. Verify with
+  `uv run pytest tests/test_config.py -v`.
 - *Depends on:* nothing. Fully isolated.
 
-**[ ] Step 2 — Agent B: `LockConfig` settings plumbing**
-- *Contract:* Add `class LockConfig(BaseModel)` to `fin3/config/settings.py`
-  (`enabled: bool = True`, `lock_dir: str = "/tmp/fin3/locks"`,
-  `timeout_s: float = 600.0`, `poll_interval_s: float = 0.5`); add
-  `lock: LockConfig = LockConfig()` to `ClientConfig`. Add a quick
-  `tests/test_config.py` assertion that `FIN3_LOCK__TIMEOUT_S` parses.
-- *Depends on:* nothing. Fully isolated.
+> Step 1 must merge into the base branch before Step 2 starts (Step 2 imports
+> `MassiveConfig`).
 
-> After Wave 1 merges into the base branch, Wave 2 starts.
+**[ ] Step 2 — Agent B: `MassiveProvider` + unit tests**
+- *Contract:* Create `fin3/providers/massive.py` defining:
+  - A `_RESOLUTION_TO_RANGE` map: `Resolution → (multiplier: int, timespan:
+    str)` (`1m→(1,"minute")`, `5m→(5,"minute")`, `15m→(15,"minute")`,
+    `1h→(1,"hour")`, `4h→(4,"hour")`, `1d→(1,"day")`).
+  - `class MassiveProvider(DataProvider)` decorated
+    `@ProviderRegistry.register("massive")`, storing config fields as in
+    Binance (`self._base_url`, `self._api_key`, `self._adjusted`,
+    `self._limit`, retry/backoff, `self._timeout`).
+  - `_request(self, params, *, url=None)`: stdlib `urllib.request` GET; if
+    `url` is None build it from `base_url` + path + `urlencode(params)`,
+    else GET the provided `next_url` (already carries cursor+key); map HTTP 429
+    → `ProviderRateLimitError`, socket timeout → `ProviderTimeoutError`, other
+    HTTP/network/JSON errors → `ProviderError`. Return parsed JSON dict.
+  - `_request_with_retry(...)`: same retry shape as Binance (retry
+    rate-limit/timeout; propagate fatal errors).
+  - `fetch(...)`: resolve `(multiplier, timespan)`; loop calling
+    `_request_with_retry`, advancing via the response's `next_url` cursor until
+    absent/empty/non-advancing; collect `results`; return `empty_ohlcv()` when
+    empty, else `_normalise(results)` with timestamps parsed as **milliseconds**
+    (`pd.to_datetime(t_ms, unit="ms", utc=True)`). Raise `ProviderError` on
+    unsupported resolution.
+  - `_normalise(results)`: map Massive keys `o/h/l/c/v/t` → canonical OHLCV,
+    dedupe on `t`, sort ascending, UTC `DatetimeIndex`, `index.name=None`.
+  - `estimate_cost(...)`: return `0.0` (subscription-based; document
+    `max_cost` not enforced).
+  - `get_instrument_bounds(symbol)`: probe earliest daily agg
+    (`/range/1/day/1970-01-01/{today}` `sort=asc&limit=1`); return
+    `{"ipo_date": <first t as UTC datetime>, "delist_date": None}`; on error or
+    empty, return `{"ipo_date": None, "delist_date": None}`.
+  - Add `"massive"` to `_register_builtin_providers()` in
+    `fin3/providers/__init__.py`.
+- *Also:* write `tests/providers/test_massive.py` mirroring
+  `test_binance.py` — an `agg(t_ms, o,h,l,c,v)` row builder;
+  `@patch("...MassiveProvider._request_with_retry")` for fetch/pagination/resolution;
+  `@patch("...MassiveProvider._request")` for retry tests; coverage:
+  symbol passthrough, all resolution mappings incl. **native 4h→(4,"hour")**,
+  ms→UTC normalisation + canonical columns, **cursor pagination following
+  `next_url` then stopping**, beyond-range filtering, unsupported-resolution
+  error, 429 retry-with-backoff, exhaust-retries, fatal-no-retry, cost=0,
+  instrument bounds (success / empty / error), `adjusted=false` default +
+  toggle, config construction keyless-of-everything-but-key.
+- *Depends on:* Step 1 merged (imports `MassiveConfig`).
 
-### Wave 2 — wiring (single agent, depends on Wave 1)
+### Wave 2 — docs + integration + roadmap
 
-**[ ] Step 3 — Agent C: wire the lock into storage + fetcher**
+**[ ] Step 3 — Agent C: docs, ROADMAP, gated live smoke**
 - *Contract:*
-  - `ArcticStorage.__init__` gains a `lock: LockConfig` param (store a
-    `SymbolLock` or `None` when disabled); add `lock_symbol(library, symbol)`
-    returning the context manager (no-op when disabled). Update `from_lmdb()`
-    (`arctic.py:131`) to default-disable locking (LMDB is single-process).
-  - `MarketDataFetcher.__init__` passes `config.lock` into `ArcticStorage`.
-  - Wrap the body of `_ensure_symbol` (`core.py:273`) in
-    `with self._storage.lock_symbol(lib_name, symbol):`.
-  - Guard `ArcticStorage.delete_symbol` (288) and `defragment_symbol` (364) with
-    the same `lock_symbol(...)` context manager.
-  - Add assertions to `tests/test_storage.py` (delete/defrag acquire lock) and
-    `tests/test_core.py` (spy `lock_symbol`, assert called once per symbol, and
-    that two distinct symbols use distinct lock keys).
-- *Depends on:* Step 1 + Step 2 merged.
-
-### Wave 3 — integration tests + docs (single agent)
-
-**[ ] Step 4 — Agent D: cross-process integration test + docs**
-- *Contract:*
-  - `tests/integration/test_concurrency.py`: spawn two `multiprocessing`
-    workers that both call `get_data()` on the **same** symbol against real
-    MinIO; use a `threading.Event`/deadline pattern (no `pytest-timeout` dep) and
-    a provider stub that records fetch-call count; assert exactly **one** fetch
-    occurs and the result is correct. Use `os.getpid()`-based library naming
-    (avoid the non-multiprocess-safe `_lib_counter`, `integration/conftest.py:117`).
-    Inherits the `-m integration` env-gated skip automatically.
-  - Update `.docs/ROADMAP.md` (check off the item), `docs/USAGE.md`,
-    `.docs/DESIGN.md` Section 10 with the locking behavior + config env vars.
-- *Depends on:* Step 3 merged.
+  - `tests/integration/test_massive_live.py`: skip unless
+    `-m integration` **and** `MASSIVE_API_KEY` is set; fetch AAPL daily over a
+    small recent range via a real `MarketDataFetcher` against MinIO (copy the
+    gating/skip pattern from `tests/integration/test_concurrency.py`); assert
+    Stage-1 validation passes, columns == `OHLCV_COLUMNS`, index is UTC.
+  - Update `.docs/ROADMAP.md`: check off "Massive Provider Implementation";
+    add a one-line correction note that the aggs `t` is milliseconds, not
+    seconds.
+  - Update `docs/USAGE.md` (Massive section), `docs/dataset-comparison.md`
+    (comparison row), and the API reference (`docs/api/`) for `MassiveProvider`
+    + `MassiveConfig`.
+  - Update `.env` / example envs: `POLYGON` → `MASSIVE`.
+- *Depends on:* Step 2 merged.
 
 ## Verification
 
-1. **Unit tests (no infrastructure):**
-   `uv run pytest tests/test_locking.py tests/test_config.py -v`
-2. **No regressions:**
-   `uv run pytest tests/ -v` (LMDB-backed; lock auto-disabled via `from_lmdb`).
-3. **Lint & types:**
+1. **Provider + config unit tests (no key, no MinIO):**
+   `uv run pytest tests/providers/test_massive.py tests/test_config.py -v`
+2. **No regressions (LMDB-backed):**
+   `uv run pytest tests/ -v`
+3. **Lint & strict types:**
    `uv run ruff check . && uv run mypy fin3/`
-4. **Cross-process correctness (real MinIO, env-gated):**
-   `uv run pytest tests/integration/test_concurrency.py -m integration -v`
-5. **Manual end-to-end:** in two shells on the dev server, run `get_data()` for
-   the same symbol concurrently; confirm the second serializes behind the first
-   (logs/`tracker` phase shows waiting) and that only one provider fetch occurs.
+4. **Gated live smoke (opt-in, needs paid key + MinIO):**
+   `uv run pytest tests/integration/test_massive_live.py -m integration -v`
+   (Skips cleanly without `MASSIVE_API_KEY` / `-m integration`.)
+5. **Manual sanity (optional):** construct a `MassiveProvider` against a paid
+   key, call `fetch("AAPL", ONE_DAY, ...)` and confirm timestamps land on real
+   dates (catches the ms-vs-seconds gotcha immediately).

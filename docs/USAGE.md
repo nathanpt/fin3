@@ -43,6 +43,8 @@ When fin3 is published to PyPI later, swap to just `"fin3[databento]"`.
 - **MinIO** running locally or accessible over the network (ArcticDB's storage backend)
 - A **data provider API key** — pick one or more:
     - **Databento** for institutional-grade equities/futures (paid)
+    - **Massive** (formerly Polygon.io) for paid US-equity OHLCV with a free
+      tier (consolidated across all NMS exchanges + dark pools + FINRA + OTC)
     - **Binance** for crypto (free, keyless public klines)
     - **Yahoo Finance** (`yfinance`) as a free, keyless alternative for US
       equities and ETFs (unofficial scraper; great for prototyping)
@@ -67,6 +69,11 @@ FIN3_PROVIDERS__DATABENTO__API_KEY=db-your-key-here
 # Set base_url to a public mirror if api.binance.com is geo-blocked.
 FIN3_PROVIDERS__BINANCE__PROVIDER_TYPE=binance
 # FIN3_PROVIDERS__BINANCE__BASE_URL=https://data-api.binance.vision
+
+# Massive (formerly Polygon.io) — paid US-equity OHLCV (limited free tier).
+# api.massive.com is the rebrand host; api.polygon.io runs in parallel.
+FIN3_PROVIDERS__MASSIVE__PROVIDER_TYPE=massive
+FIN3_PROVIDERS__MASSIVE__API_KEY=your-massive-key-here
 
 # Yahoo Finance is keyless. Install with: pip install fin3[yfinance]
 FIN3_PROVIDERS__YAHOO__PROVIDER_TYPE=yahoo
@@ -156,6 +163,43 @@ Databento); set `YahooConfig(auto_adjust=True)` for adjusted OHLC. Note Yahoo
 limits intraday history (`1m` → 7 days, `5m`–`30m` → 60 days, `60m` → 730
 days); daily data is unrestricted. Yahoo has no native `4h` interval — `4h`
 requests fetch `1h` bars and aggregate up.
+
+### Paid equity data via Massive (formerly Polygon.io)
+
+For paid, production-grade US-equity OHLCV without Databento, use
+`provider="massive"`. Polygon.io rebranded to **Massive** (massive.com) on
+2025-10-30; APIs, keys, and data are unchanged, and `api.massive.com` is the
+rebrand host (`api.polygon.io` runs in parallel). A limited free tier exists;
+paid tiers unlock deeper history. Massive consolidates across all NMS
+exchanges, dark pools, FINRA, and OTC, so its bars avoid the single-venue null
+problem some Databento datasets have.
+
+```python
+from fin3.config.settings import MassiveConfig
+
+fetcher = MarketDataFetcher(
+    ClientConfig(
+        minio=MinioConfig(endpoint="localhost:9000", access_key="...", secret_key="..."),
+        providers={"massive": MassiveConfig(api_key="your-massive-key")},
+    )
+)
+
+df = fetcher.get_data(
+    asset_type=AssetType.EQUITY_US,
+    provider="massive",
+    resolution=Resolution.ONE_DAY,
+    symbols=["AAPL", "MSFT", "GOOG"],
+    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    end=datetime(2024, 3, 31, tzinfo=timezone.utc),
+)
+```
+
+Prices are stored **raw** by default (`adjusted=False`, matching Databento);
+set `MassiveConfig(adjusted=True)` for split/dividend-adjusted OHLC. Unlike
+Yahoo, Massive supports an arbitrary bar multiplier, so `4h` maps natively to
+`4×hour` (no aggregation fallback). Massive is subscription-based and exposes
+no per-query cost, so `estimate_cost()` returns `0.0` and the `max_cost` ceiling
+is **not** enforced for this provider.
 
 ### Crypto (24/7 markets)
 
@@ -472,7 +516,7 @@ class MyProvider(DataProvider):
         ...
 ```
 
-2. Add a config model in `fin3/config/settings.py` following the existing pattern (see `PolygonConfig` / `BinanceConfig`).
+2. Add a config model in `fin3/config/settings.py` following the existing pattern (see `MassiveConfig` / `BinanceConfig`).
 
 3. Add the provider credentials to your `.env`:
 
