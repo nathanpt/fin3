@@ -71,8 +71,27 @@ class BinanceConfig(BaseModel):
     request_limit: int = 1000
 
 
+class YahooConfig(BaseModel):
+    """Yahoo Finance (yfinance) provider settings.
+
+    yfinance scrapes Yahoo's public endpoints unauthenticated, so no API key
+    is needed. Prices are stored **raw** by default (``auto_adjust=False``) for
+    parity with Databento and fin3's store-raw-canonical philosophy; flip
+    ``auto_adjust`` for split/dividend-adjusted OHLC. Yahoo has no native
+    ``4h`` interval — requests at that resolution fetch ``1h`` bars and rely
+    on ``core._aggregate_bars`` to roll them up.
+    """
+
+    provider_type: Literal["yahoo"] = "yahoo"
+    auto_adjust: bool = False
+    max_retries: int = 3
+    initial_backoff: float = 1.0
+    max_backoff: float = 60.0
+    timeout: float = 30.0
+
+
 ProviderConfig = Annotated[
-    DatabentoConfig | PolygonConfig | BinanceConfig,
+    DatabentoConfig | PolygonConfig | BinanceConfig | YahooConfig,
     Field(discriminator="provider_type"),
 ]
 """Discriminated union of all supported provider config models.
