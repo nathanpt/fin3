@@ -40,14 +40,35 @@ class DatabentoConfig(BaseModel):
     max_backoff: float = 30.0
 
 
-class PolygonConfig(BaseModel):
-    """Polygon.io API connection settings.
+class MassiveConfig(BaseModel):
+    """Massive (formerly Polygon.io) API connection settings.
 
-    Configures authentication for Polygon's REST API (aggs/bars endpoint).
+    Polygon.io rebranded to **Massive** (massive.com) on 2025-10-30. APIs,
+    keys, and data are unchanged; ``api.polygon.io`` and ``api.massive.com``
+    run in parallel for an extended transition. The legacy names are
+    deprecated — build against ``api.massive.com``.
+
+    Configures authentication and behaviour for Massive's REST aggregates
+    (``/v2/aggs``) endpoint, which serves historical OHLCV bars. The v1 scope
+    is US equities (options/forex/futures/crypto are out of scope — crypto is
+    served by Binance). Massive is a paid/keyed source with a limited free
+    tier.
     """
 
-    provider_type: Literal["polygon"] = "polygon"
+    provider_type: Literal["massive"] = "massive"
     api_key: str
+    base_url: str = "https://api.massive.com"
+    adjusted: bool = False
+    """Price basis. Stored **raw** by default (``adjusted=False``) for parity
+    with Databento and fin3's store-raw-canonical philosophy; flip to ``True``
+    for split/dividend-adjusted OHLC. Note Massive's API default is adjusted,
+    so this is sent explicitly on every request."""
+    request_limit: int = 50000
+    """Max bars per request. Massive caps aggregates pages at 50,000."""
+    max_retries: int = 3
+    initial_backoff: float = 1.0
+    max_backoff: float = 60.0
+    timeout: float = 30.0
 
 
 class BinanceConfig(BaseModel):
@@ -91,7 +112,7 @@ class YahooConfig(BaseModel):
 
 
 ProviderConfig = Annotated[
-    DatabentoConfig | PolygonConfig | BinanceConfig | YahooConfig,
+    DatabentoConfig | MassiveConfig | BinanceConfig | YahooConfig,
     Field(discriminator="provider_type"),
 ]
 """Discriminated union of all supported provider config models.
