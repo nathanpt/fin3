@@ -5,7 +5,12 @@ import os
 import pytest
 from pydantic import ValidationError
 
-from fin3.config.settings import ClientConfig, DatabentoConfig, MinioConfig
+from fin3.config.settings import (
+    ClientConfig,
+    DatabentoConfig,
+    MassiveConfig,
+    MinioConfig,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -44,10 +49,30 @@ class TestClientConfig:
             ),
             providers={
                 "databento": DatabentoConfig(api_key="PLACEHOLDER-test-key"),
+                "massive": MassiveConfig(api_key="PLACEHOLDER-test-key"),
             },
         )
         assert isinstance(config.providers["databento"], DatabentoConfig)
         assert config.providers["databento"].api_key == "PLACEHOLDER-test-key"
+        assert isinstance(config.providers["massive"], MassiveConfig)
+        assert config.providers["massive"].provider_type == "massive"
+        assert config.providers["massive"].api_key == "PLACEHOLDER-test-key"
+
+    def test_massive_config_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FIN3_MINIO__ENDPOINT", "localhost:9000")
+        monkeypatch.setenv("FIN3_MINIO__ACCESS_KEY", "minioadmin")
+        monkeypatch.setenv("FIN3_MINIO__SECRET_KEY", "minioadmin")
+        monkeypatch.setenv(
+            "FIN3_PROVIDERS__MASSIVE__PROVIDER_TYPE", "massive"
+        )
+        monkeypatch.setenv("FIN3_PROVIDERS__MASSIVE__API_KEY", "env-key")
+        monkeypatch.setenv("FIN3_PROVIDERS__MASSIVE__ADJUSTED", "true")
+        config = ClientConfig()  # type: ignore[call-arg]
+        assert isinstance(config.providers["massive"], MassiveConfig)
+        assert config.providers["massive"].api_key == "env-key"
+        assert config.providers["massive"].adjusted is True
+        assert config.providers["massive"].base_url == "https://api.massive.com"
+        assert config.providers["massive"].request_limit == 50000
 
     def test_log_level_default(self) -> None:
         config = ClientConfig(

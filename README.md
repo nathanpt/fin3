@@ -206,7 +206,7 @@ The project ships several standalone scripts under `scripts/`. A unified `fin3` 
 | Document | Contents |
 |---|---|
 | [docs/USAGE.md](docs/USAGE.md) | Full usage guide: install, config, fetching data, crypto, futures, concurrency, monitoring, exception handling, adding providers |
-| [docs/dataset-comparison.md](docs/dataset-comparison.md) | Databento dataset cost analysis (XNAS.ITCH vs ARCX.PILLAR vs ...) |
+| [docs/dataset-comparison.md](docs/dataset-comparison.md) | Provider comparison (Databento/Massive/Yahoo/Binance) + Databento dataset cost analysis (XNAS.ITCH vs ARCX.PILLAR vs ...) |
 | [docs/resource-monitoring-notes.md](docs/resource-monitoring-notes.md) | Resource monitoring implementation details and optimizations |
 
 ---
