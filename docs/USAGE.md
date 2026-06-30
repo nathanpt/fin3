@@ -41,8 +41,11 @@ When fin3 is published to PyPI later, swap to just `"fin3[databento]"`.
 ## Prerequisites
 
 - **MinIO** running locally or accessible over the network (ArcticDB's storage backend)
-- A **data provider API key** — Databento for equities/futures, or Binance for crypto
-  (Binance's public klines endpoint needs no key)
+- A **data provider API key** — pick one or more:
+    - **Databento** for institutional-grade equities/futures (paid)
+    - **Binance** for crypto (free, keyless public klines)
+    - **Yahoo Finance** (`yfinance`) as a free, keyless alternative for US
+      equities and ETFs (unofficial scraper; great for prototyping)
 
 ## Setup
 
@@ -64,6 +67,10 @@ FIN3_PROVIDERS__DATABENTO__API_KEY=db-your-key-here
 # Set base_url to a public mirror if api.binance.com is geo-blocked.
 FIN3_PROVIDERS__BINANCE__PROVIDER_TYPE=binance
 # FIN3_PROVIDERS__BINANCE__BASE_URL=https://data-api.binance.vision
+
+# Yahoo Finance is keyless. Install with: pip install fin3[yfinance]
+FIN3_PROVIDERS__YAHOO__PROVIDER_TYPE=yahoo
+# FIN3_PROVIDERS__YAHOO__AUTO_ADJUST=false  # raw OHLC by default
 ```
 
 All settings use the `FIN3_` prefix with `__` as the nested delimiter, following Pydantic Settings conventions.
@@ -72,7 +79,12 @@ All settings use the `FIN3_` prefix with `__` as the nested delimiter, following
 
 ```python
 from fin3 import ClientConfig, MarketDataFetcher
-from fin3.config.settings import MinioConfig, DatabentoConfig, BinanceConfig
+from fin3.config.settings import (
+    MinioConfig,
+    DatabentoConfig,
+    BinanceConfig,
+    YahooConfig,
+)
 
 config = ClientConfig(
     minio=MinioConfig(
@@ -83,6 +95,7 @@ config = ClientConfig(
     providers={
         "databento": DatabentoConfig(api_key="db-your-key-here"),
         "binance": BinanceConfig(),  # keyless public klines
+        "yahoo": YahooConfig(),  # keyless; needs `pip install fin3[yfinance]`
     },
 )
 
@@ -119,6 +132,30 @@ df = fetcher.get_data(
     end=datetime(2024, 3, 31, tzinfo=timezone.utc),
 )
 ```
+
+### Free equity data via Yahoo Finance
+
+For US equities and ETFs without a Databento subscription, swap
+`provider="databento"` for `provider="yahoo"`. Yahoo data is free and
+keyless (install the extra with `pip install fin3[yfinance]`), but unofficial
+and rate-limited, so it suits prototyping and research rather than production.
+
+```python
+df = fetcher.get_data(
+    asset_type=AssetType.EQUITY_US,
+    provider="yahoo",
+    resolution=Resolution.ONE_DAY,
+    symbols=["AAPL", "MSFT", "GOOG"],
+    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    end=datetime(2024, 3, 31, tzinfo=timezone.utc),
+)
+```
+
+Prices are stored **raw** by default (split/dividend-unadjusted, matching
+Databento); set `YahooConfig(auto_adjust=True)` for adjusted OHLC. Note Yahoo
+limits intraday history (`1m` → 7 days, `5m`–`30m` → 60 days, `60m` → 730
+days); daily data is unrestricted. Yahoo has no native `4h` interval — `4h`
+requests fetch `1h` bars and aggregate up.
 
 ### Crypto (24/7 markets)
 

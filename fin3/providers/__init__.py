@@ -85,11 +85,15 @@ class ProviderRegistry:
 # SDK import lazily inside ``__init__``, so importing the module is cheap and
 # side-effect-free beyond registration.
 def _register_builtin_providers() -> None:
-    """Import builtin provider modules to trigger registration side-effects."""
+    """Import builtin provider modules to trigger registration side-effects.
+
+    Module file names are decoupled from the registry key each provider uses
+    in ``@register(...)`` — e.g. ``yfinance.py`` registers under ``"yahoo"``.
+    """
     from importlib import import_module
 
-    for name in ("databento", "binance"):
-        import_module(f"fin3.providers.{name}")
+    for module_name in ("databento", "binance", "yfinance"):
+        import_module(f"fin3.providers.{module_name}")
 
 
 _register_builtin_providers()

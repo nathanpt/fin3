@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 databento = ["databento"]
+yfinance = ["yfinance"]
 dev = [
     "pytest",
     "pytest-cov",

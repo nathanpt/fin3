@@ -72,8 +72,8 @@ Built on [ArcticDB](https://arcticdb.io/) + [MinIO](https://min.io/)
     ---
 
     Pluggable providers behind one registry: Databento for equities/futures,
-    Binance for crypto (free, keyless public klines). Same declarative
-    `get_data()` regardless of source.
+    Binance for crypto (free, keyless public klines), and Yahoo Finance for
+    free US equity/ETF data. Same declarative `get_data()` regardless of source.
 
 </div>
 
