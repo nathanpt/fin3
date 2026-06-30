@@ -92,7 +92,7 @@ def _register_builtin_providers() -> None:
     """
     from importlib import import_module
 
-    for module_name in ("databento", "binance", "yfinance"):
+    for module_name in ("databento", "binance", "yfinance", "massive"):
         import_module(f"fin3.providers.{module_name}")
 
 
