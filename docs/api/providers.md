@@ -11,3 +11,6 @@ decorator-based `ProviderRegistry` and implement the `DataProvider` ABC.
 ::: fin3.providers.binance.BinanceProvider
     options:
       show_root_heading: true
+::: fin3.providers.yfinance.YahooProvider
+    options:
+      show_root_heading: true
