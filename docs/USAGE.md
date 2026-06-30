@@ -41,7 +41,8 @@ When fin3 is published to PyPI later, swap to just `"fin3[databento]"`.
 ## Prerequisites
 
 - **MinIO** running locally or accessible over the network (ArcticDB's storage backend)
-- A **data provider API key** (Databento is the only provider implemented today)
+- A **data provider API key** — Databento for equities/futures, or Binance for crypto
+  (Binance's public klines endpoint needs no key)
 
 ## Setup
 
@@ -58,6 +59,11 @@ FIN3_MINIO__SECRET_KEY=minioadmin
 # Provider credentials (nested delimiter is __)
 FIN3_PROVIDERS__DATABENTO__PROVIDER_TYPE=databento
 FIN3_PROVIDERS__DATABENTO__API_KEY=db-your-key-here
+
+# Binance is optional and keyless by default (klines is a public endpoint).
+# Set base_url to a public mirror if api.binance.com is geo-blocked.
+FIN3_PROVIDERS__BINANCE__PROVIDER_TYPE=binance
+# FIN3_PROVIDERS__BINANCE__BASE_URL=https://data-api.binance.vision
 ```
 
 All settings use the `FIN3_` prefix with `__` as the nested delimiter, following Pydantic Settings conventions.
@@ -66,7 +72,7 @@ All settings use the `FIN3_` prefix with `__` as the nested delimiter, following
 
 ```python
 from fin3 import ClientConfig, MarketDataFetcher
-from fin3.config.settings import MinioConfig, DatabentoConfig
+from fin3.config.settings import MinioConfig, DatabentoConfig, BinanceConfig
 
 config = ClientConfig(
     minio=MinioConfig(
@@ -76,6 +82,7 @@ config = ClientConfig(
     ),
     providers={
         "databento": DatabentoConfig(api_key="db-your-key-here"),
+        "binance": BinanceConfig(),  # keyless public klines
     },
 )
 
@@ -115,16 +122,24 @@ df = fetcher.get_data(
 
 ### Crypto (24/7 markets)
 
+Crypto uses the continuous 24/7 calendar (no weekend/holiday gaps). Binance is
+the natural provider — its public spot klines endpoint is free and needs no
+API key. Symbols use the `BASE-USD` convention (`BTC-USD`), which fin3 maps to
+Binance's `USDT` quote (`BTCUSDT`) automatically.
+
 ```python
 df = fetcher.get_data(
     asset_type=AssetType.CRYPTO,
-    provider="databento",
+    provider="binance",
     resolution=Resolution.ONE_HOUR,
-    symbols=["BTC-USD"],
+    symbols=["BTC-USD", "ETH-USD"],
     start=datetime(2024, 1, 1, tzinfo=timezone.utc),
     end=datetime(2024, 6, 1, tzinfo=timezone.utc),
 )
 ```
+
+If `api.binance.com` is geo-blocked in your region, point `BinanceConfig` at a
+public market-data mirror such as `https://data-api.binance.vision`.
 
 ### Futures (CME calendar)
 
