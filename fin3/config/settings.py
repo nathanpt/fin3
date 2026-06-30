@@ -53,12 +53,22 @@ class PolygonConfig(BaseModel):
 class BinanceConfig(BaseModel):
     """Binance API connection settings.
 
-    Configures authentication for Binance's spot market API (klines endpoint).
+    Binance's spot klines endpoint (``/api/v3/klines``) is public and requires
+    no authentication, so ``api_key``/``api_secret`` are optional — supplying
+    them only grants a higher per-IP rate-limit weight allowance. The provider
+    trades the fin3 ``BASE-USD`` convention against Binance's ``USDT`` quote
+    (e.g. ``BTC-USD`` -> ``BTCUSDT``).
     """
 
     provider_type: Literal["binance"] = "binance"
-    api_key: str
+    api_key: str = ""
     api_secret: str = ""
+    base_url: str = "https://api.binance.com"
+    max_retries: int = 3
+    initial_backoff: float = 1.0
+    max_backoff: float = 60.0
+    timeout: float = 30.0
+    request_limit: int = 1000
 
 
 ProviderConfig = Annotated[
@@ -117,5 +127,3 @@ class ClientConfig(BaseSettings):
         env_file=".env",
         env_nested_delimiter="__",
     )
-
-

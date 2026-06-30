@@ -76,3 +76,20 @@ class ProviderRegistry:
             return provider_cls
 
         return decorator
+
+
+# Builtin provider modules register themselves via the ``@register`` decorator
+# at import time. Importing them here ensures the registry is populated for
+# any entry point (e.g. ``MarketDataFetcher``) without callers having to import
+# each provider module explicitly. Each module performs its heavy/optional
+# SDK import lazily inside ``__init__``, so importing the module is cheap and
+# side-effect-free beyond registration.
+def _register_builtin_providers() -> None:
+    """Import builtin provider modules to trigger registration side-effects."""
+    from importlib import import_module
+
+    for name in ("databento", "binance"):
+        import_module(f"fin3.providers.{name}")
+
+
+_register_builtin_providers()

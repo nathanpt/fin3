@@ -67,6 +67,14 @@ Built on [ArcticDB](https://arcticdb.io/) + [MinIO](https://min.io/)
     10+ vectorized integrity checks with HTML dashboards, plus live resource
     monitoring (tmux pane, rich info bar, or CI summary).
 
+- :material-swap-horizontal: **Multi-provider**
+
+    ---
+
+    Pluggable providers behind one registry: Databento for equities/futures,
+    Binance for crypto (free, keyless public klines). Same declarative
+    `get_data()` regardless of source.
+
 </div>
 
 ## Quick start
