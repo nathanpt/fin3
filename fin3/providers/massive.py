@@ -333,6 +333,18 @@ class MassiveProvider(DataProvider):
         delisting date from this endpoint, so ``delist_date`` is always None.
         On any error (unknown symbol, network), returns ``{None, None}`` so
         the metadata bootstrap falls back to discovery.
+
+        .. note::
+
+            On **limited plans** (including the free tier), Massive returns
+            HTTP 200 with plan-truncated results rather than an error or the
+            symbol's full history. The probe therefore resolves to the plan's
+            history boundary (e.g. ~2024-07 on the free tier as of mid-2026),
+            **not** the symbol's true listing date (AAPL IPO 1980-12-12). This
+            is still a correct lower bound for gap detection — it is the
+            effective first *accessible* bar — but the result is plan-dependent
+            and a later plan upgrade will not invalidate any cached value
+            automatically. A paid key resolves the true listing date.
         """
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         # Probe the earliest available daily aggregate: full history from

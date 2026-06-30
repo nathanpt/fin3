@@ -93,6 +93,31 @@ When working in this repository, you must strictly adhere to the following rules
 - Use fixtures for MinIO/ArcticDB mocks (or LMDB-backed local instances)
 - Test naming: `test_<feature>_<scenario>()` (e.g. `test_get_data_downloads_missing_range`)
 
+### Real download tests are mandatory for data providers
+
+**Any provider that hits a network API MUST be verified with at least one real,
+end-to-end download against the live service before it is considered done or
+merged.** Mocked-HTTP unit tests are necessary but **not sufficient** — they
+only prove the code handles the response shapes the author *assumed*, not the
+shapes the API actually returns. They give false confidence.
+
+Concretely, before marking a provider complete:
+
+- Run a real `fetch()` that returns rows and inspect the actual JSON response
+  shape (field names, timestamp units, pagination cursor format, error bodies).
+- Exercise pagination with a range large enough to span at least two pages.
+- Exercise `get_instrument_bounds()` against a known symbol.
+- Run the gated integration smoke (`tests/integration/test_provider_<name>.py`
+  with `-m integration` and a real key) and confirm it passes, not just skips.
+
+**If a real download test is NOT performed** (e.g. no key available, paid-only
+  source, network unavailable), you MUST call that out explicitly and loudly in
+  every status report, PR description, and release note — phrase it as
+  "code-complete but **not verified against the live API**", never as "done" or
+  "shipped". Do not let a green mocked-test suite stand in for real verification.
+  Do not merge to main as a shipped feature without operator sign-off on that
+  unverified status.
+
 ## Commit & Pull Request Guidelines
 
 - Write clear, descriptive commit messages in imperative mood (e.g. "Add gap detection for multi-symbol queries")
