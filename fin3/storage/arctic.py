@@ -174,13 +174,13 @@ class ArcticStorage:
         import hmac
         import urllib.request
         import urllib.error
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt, timezone
 
         scheme = "https" if self._config.secure else "http"
         url = f"{scheme}://{self._config.endpoint}/{bucket}"
 
-        now = _dt.utcnow().strftime("%Y%m%dT%H%M%SZ")
-        date_stamp = _dt.utcnow().strftime("%Y%m%d")
+        now = _dt.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        date_stamp = _dt.now(timezone.utc).strftime("%Y%m%d")
         region = "us-east-1"
         service = "s3"
         host = self._config.endpoint
