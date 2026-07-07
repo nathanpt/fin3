@@ -173,8 +173,16 @@ class ResourceTracker:
         # Wrap provider fetch for network byte counting
         self._wrap_provider()
 
-        # Set up display
-        self._setup_display()
+        # Set up display. If this raises (e.g. tmux missing, a rich failure),
+        # the context-manager protocol does NOT call __exit__, so undo the
+        # side effects we just installed before re-raising — otherwise the
+        # provider stays monkey-patched and the sampler/writer threads + temp
+        # file leak.
+        try:
+            self._setup_display()
+        except Exception:
+            self._abort_setup()
+            raise
 
         logger.info("monitor.tracker_started",
                      library=self._library, symbols=self._symbols)
@@ -219,18 +227,18 @@ class ResourceTracker:
             self._live.stop()
             self._live = None
 
-        # Render summary to stderr
-        if self._is_tty or True:  # always print summary
-            elapsed = self._end_time - self._start_time
-            panel = render_summary(
-                metrics,
-                elapsed,
-                symbols=self._symbols,
-                resolution=self._resolution.value,
-                rows=self._rows,
-                library=self._library,
-            )
-            self._console.print(panel)
+        # Always render the summary to stderr — even when piped / in CI —
+        # so operators get a final report regardless of display mode.
+        elapsed = self._end_time - self._start_time
+        panel = render_summary(
+            metrics,
+            elapsed,
+            symbols=self._symbols,
+            resolution=self._resolution.value,
+            rows=self._rows,
+            library=self._library,
+        )
+        self._console.print(panel)
 
         # Clean up temp file
         if self._metrics_file and os.path.exists(self._metrics_file):
@@ -254,8 +262,15 @@ class ResourceTracker:
         byte_counter = self._byte_counter
 
         def instrumented_fetch(*args: Any, **kwargs: Any) -> pd.DataFrame:
-            assert self._original_fetch is not None
-            result = self._original_fetch(*args, **kwargs)
+            original = self._original_fetch
+            if original is None:
+                # Defensive: _restore_provider() nulls _original_fetch on exit,
+                # so this only fires for a stale reference held past the
+                # context. Explicit raise (not assert) so it survives -O.
+                raise RuntimeError(
+                    "instrumented_fetch invoked after ResourceTracker exited"
+                )
+            result = original(*args, **kwargs)
             byte_counter.add(result)
             return result
 
@@ -266,6 +281,41 @@ class ResourceTracker:
         if self._original_fetch is not None:
             self._provider.fetch = self._original_fetch  # type: ignore[method-assign]
             self._original_fetch = None
+
+    def _abort_setup(self) -> None:
+        """Undo ``__enter__`` side effects when setup fails mid-way.
+
+        Called when ``_setup_display`` (or a later ``__enter__`` step) raises:
+        the context-manager protocol does not invoke ``__exit__`` if
+        ``__enter__`` fails, so without this the provider would stay
+        monkey-patched and the sampler/writer threads + temp file would leak.
+        Best-effort — each step is guarded so cleanup never masks the
+        original exception.
+        """
+        self._restore_provider()
+        self._sampler.stop()
+        self._stop_writer.set()
+        if self._writer_thread is not None:
+            self._writer_thread.join(timeout=2.0)
+            self._writer_thread = None
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+            self._live = None
+        if self._pane_id is not None:
+            try:
+                kill_pane(self._pane_id)
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
+            self._pane_id = None
+        if self._metrics_file and os.path.exists(self._metrics_file):
+            try:
+                os.unlink(self._metrics_file)
+            except OSError:
+                pass
+            self._metrics_file = ""
 
     def _setup_display(self) -> None:
         """Set up the live display.
