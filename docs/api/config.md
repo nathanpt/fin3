@@ -9,4 +9,5 @@ the `FIN3_` prefix with `__` nested delimiter.
 ::: fin3.config.settings.MassiveConfig
 ::: fin3.config.settings.BinanceConfig
 ::: fin3.config.settings.YahooConfig
+::: fin3.config.settings.ThetaDataConfig
 ::: fin3.config.settings.LockConfig

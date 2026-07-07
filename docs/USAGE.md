@@ -48,6 +48,9 @@ When fin3 is published to PyPI later, swap to just `"fin3[databento]"`.
     - **Binance** for crypto (free, keyless public klines)
     - **Yahoo Finance** (`yfinance`) as a free, keyless alternative for US
       equities and ETFs (unofficial scraper; great for prototyping)
+    - **ThetaData** (`thetadata` SDK) for US-equity OHLCV via the official SDK
+      (API-key auth, SDK >=1.0.9; limited free EOD tier, paid tiers for
+      intraday). Stocks-only v1 — ThetaData's options/Greeks value is deferred.
 
 ## Setup
 
@@ -78,6 +81,12 @@ FIN3_PROVIDERS__MASSIVE__API_KEY=your-massive-key-here
 # Yahoo Finance is keyless. Install with: pip install fin3[yfinance]
 FIN3_PROVIDERS__YAHOO__PROVIDER_TYPE=yahoo
 # FIN3_PROVIDERS__YAHOO__AUTO_ADJUST=false  # raw OHLC by default
+
+# ThetaData (official thetadata SDK, API-key auth — no Theta Terminal).
+# Install with: pip install fin3[thetadata]. Limited free EOD tier; paid
+# tiers unlock intraday. Stocks-only v1 (options/Greeks deferred).
+FIN3_PROVIDERS__THETADATA__PROVIDER_TYPE=thetadata
+FIN3_PROVIDERS__THETADATA__API_KEY=your-thetadata-key-here
 ```
 
 All settings use the `FIN3_` prefix with `__` as the nested delimiter, following Pydantic Settings conventions.
@@ -91,6 +100,7 @@ from fin3.config.settings import (
     DatabentoConfig,
     BinanceConfig,
     YahooConfig,
+    ThetaDataConfig,
 )
 
 config = ClientConfig(
@@ -103,6 +113,7 @@ config = ClientConfig(
         "databento": DatabentoConfig(api_key="db-your-key-here"),
         "binance": BinanceConfig(),  # keyless public klines
         "yahoo": YahooConfig(),  # keyless; needs `pip install fin3[yfinance]`
+        # "thetadata": ThetaDataConfig(api_key="your-thetadata-key"),  # needs `pip install fin3[thetadata]`
     },
 )
 
@@ -200,6 +211,50 @@ Yahoo, Massive supports an arbitrary bar multiplier, so `4h` maps natively to
 `4×hour` (no aggregation fallback). Massive is subscription-based and exposes
 no per-query cost, so `estimate_cost()` returns `0.0` and the `max_cost` ceiling
 is **not** enforced for this provider.
+
+### US-equity OHLCV via ThetaData (official SDK)
+
+For an SDK-first US-equity OHLCV source, use `provider="thetadata"`. It uses
+the official **`thetadata`** PyPI SDK (gRPC) with **API-key authentication**
+(SDK >=1.0.9 — no Theta Terminal required). Install the extra with
+`pip install fin3[thetadata]` (requires Python 3.12+). A limited free tier
+serves recent **EOD** history; intraday (1m/5m/15m/1h) needs a paid Value tier.
+
+```python
+from fin3.config.settings import ThetaDataConfig
+
+fetcher = MarketDataFetcher(
+    ClientConfig(
+        minio=MinioConfig(endpoint="localhost:9000", access_key="...", secret_key="..."),
+        providers={"thetadata": ThetaDataConfig(api_key="your-thetadata-key")},
+    )
+)
+
+df = fetcher.get_data(
+    asset_type=AssetType.EQUITY_US,
+    provider="thetadata",
+    resolution=Resolution.ONE_DAY,
+    symbols=["AAPL", "MSFT", "GOOG"],
+    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    end=datetime(2024, 3, 31, tzinfo=timezone.utc),
+)
+```
+
+The v1 scope is **US-equity OHLCV only** — ThetaData's standout value
+(options ticks, Greeks, full historical chains) does not map to the OHLCV
+schema and is deferred to a dedicated options phase. Prices are **raw**
+(unadjusted). Two operational notes:
+
+- **Intraday is per-day**: ThetaData's intraday endpoint serves one trading
+  day per call, so a multi-day intraday range issues one call per NYSE
+  session (weekends/holidays are skipped via `exchange_calendars`). This is
+  automatic — no caller action needed.
+- **No native `4h`**: `4h` requests fetch `1h` bars and `core._aggregate_bars`
+  rolls them up (same pattern as Yahoo).
+- **Cost not enforced**: ThetaData is subscription-based, so
+  `estimate_cost()` returns `0.0` and the `max_cost` ceiling is **not**
+  enforced for this provider.
+
 
 ### Crypto (24/7 markets)
 

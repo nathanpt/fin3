@@ -10,6 +10,7 @@ from fin3.config.settings import (
     DatabentoConfig,
     MassiveConfig,
     MinioConfig,
+    ThetaDataConfig,
 )
 
 
@@ -73,6 +74,20 @@ class TestClientConfig:
         assert config.providers["massive"].adjusted is True
         assert config.providers["massive"].base_url == "https://api.massive.com"
         assert config.providers["massive"].request_limit == 50000
+
+    def test_thetadata_config_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FIN3_MINIO__ENDPOINT", "localhost:9000")
+        monkeypatch.setenv("FIN3_MINIO__ACCESS_KEY", "minioadmin")
+        monkeypatch.setenv("FIN3_MINIO__SECRET_KEY", "minioadmin")
+        monkeypatch.setenv(
+            "FIN3_PROVIDERS__THETADATA__PROVIDER_TYPE", "thetadata"
+        )
+        monkeypatch.setenv("FIN3_PROVIDERS__THETADATA__API_KEY", "td-env-key")
+        config = ClientConfig()  # type: ignore[call-arg]
+        assert isinstance(config.providers["thetadata"], ThetaDataConfig)
+        assert config.providers["thetadata"].provider_type == "thetadata"
+        assert config.providers["thetadata"].api_key == "td-env-key"
+        assert config.providers["thetadata"].max_retries == 3
 
     def test_log_level_default(self) -> None:
         config = ClientConfig(

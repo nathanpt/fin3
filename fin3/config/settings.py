@@ -110,9 +110,27 @@ class YahooConfig(BaseModel):
     max_backoff: float = 60.0
     timeout: float = 30.0
 
+class ThetaDataConfig(BaseModel):
+    """ThetaData (thetadata SDK) provider settings.
+
+    ThetaData authenticates via an API key (SDK >=1.0.9) — no Theta Terminal
+    required. It is subscription-based (a limited free EOD tier exists), so
+    ``estimate_cost()`` returns ``0.0`` and the ``MarketDataFetcher`` cost
+    ceiling is **not** enforced for this provider. The v1 scope is US-equity
+    OHLCV; ThetaData's options/Greeks/chains value does not map to the OHLCV
+    schema and is deferred to a dedicated options phase.
+    """
+
+    provider_type: Literal["thetadata"] = "thetadata"
+    api_key: str
+    max_retries: int = 3
+    initial_backoff: float = 1.0
+    max_backoff: float = 30.0
+    timeout: float = 30.0
+
 
 ProviderConfig = Annotated[
-    DatabentoConfig | MassiveConfig | BinanceConfig | YahooConfig,
+    DatabentoConfig | MassiveConfig | BinanceConfig | YahooConfig | ThetaDataConfig,
     Field(discriminator="provider_type"),
 ]
 """Discriminated union of all supported provider config models.

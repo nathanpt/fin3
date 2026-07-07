@@ -6,7 +6,7 @@ cost tolerance, and data-quality needs. This page compares the **providers**
 fin3 supports, then dives into the **Databento dataset variants** (the
 deepest, most nuanced source).
 
-Audited 2025-05-26 (Databento figures); updated 2026-06-30 to cover Massive.
+Audited 2025-05-26 (Databento figures); updated 2026-06-30 to cover Massive; updated 2026-07-07 to add ThetaData.
 
 ## Provider Comparison
 
@@ -16,6 +16,7 @@ Audited 2025-05-26 (Databento figures); updated 2026-06-30 to cover Massive.
 | **Massive** (was Polygon.io) | US equities headline (options/forex/futures/crypto also available) | Paid subscription, limited free tier | API key | Tier-dependent | ❌ Not enforced (subscription) | Raw |
 | **Yahoo Finance** | US equities/ETFs (also FX, indices, futures, crypto via Yahoo) | Free | None (keyless scraper) | Limited (`1m`→7d … `60m`→730d); daily unlimited | N/A (free) | Raw |
 | **Binance** | Crypto spot | Free | Optional key (higher weight) | Deep | N/A (free) | Raw |
+| **ThetaData** | US equities (options/Greeks deferred) | Paid subscription, limited free EOD tier | API key (SDK >=1.0.9) | Tier-dependent (free = EOD only) | ❌ Not enforced (subscription) | Raw |
 
 All providers normalize to the canonical OHLCV schema with a UTC
 `DatetimeIndex`. **Raw-default** across the board (split/dividend-unadjusted)
@@ -31,6 +32,9 @@ for cross-provider parity; flip via each provider's config for adjusted prices.
 - **Institutional equities/futures, depth (MBO/MBP), precise per-query cost
   control** → **Databento** (usage-based; the only provider where
   `max_cost` is a real budget guardrail).
+- **SDK-first US-equity OHLCV (options roadmap)** → **ThetaData** (official
+  `thetadata` SDK, API-key auth; stocks-only v1, options phase planned; free
+  EOD tier).
 
 ### Provider notes
 
@@ -88,6 +92,29 @@ and data are unchanged, and `api.massive.com` is the rebrand host
   Binance's `USDT` quote (`BTCUSDT`) automatically.
 - **Caveat**: if `api.binance.com` is geo-blocked, point `BinanceConfig` at a
   public mirror like `https://data-api.binance.vision`.
+
+#### ThetaData
+
+ThetaData authenticates via an **API key** through the official `thetadata`
+SDK (>=1.0.9) — the older "Theta Terminal token" model is obsolete.
+
+- **Cost model**: subscription tiers (limited **free EOD tier**; paid Value
+  $40/mo for 1-min intraday, Standard/Pro for tick streaming).
+  Subscription-based, so `estimate_cost()` returns `0.0` and the `max_cost`
+  ceiling is **not enforced**.
+- **Strength**: SDK-first (gRPC), and the natural source for *options* tick
+  data / Greeks / historical chains — but that value is **deferred** (see
+  below). For v1 it provides clean US-equity OHLCV alongside the others.
+- **Scope (v1)**: US-equity OHLCV only. ThetaData's options/Greeks/chains do
+  **not** map to the OHLCV schema; they are scoped to a dedicated options
+  phase (`AssetType.OPTIONS` + an options data model). Not yet implemented.
+- **Resolution**: `1m`/`5m`/`15m`/`1h` map directly; no native `4h` (`4h`
+  fetches `1h` bars and `core._aggregate_bars` rolls them up). The intraday
+  endpoint is **per trading day**, so a multi-day intraday range issues one
+  call per NYSE session (weekends/holidays skipped via `exchange_calendars`).
+- **Price basis**: raw (ThetaData OHLC is unadjusted).
+- **Python**: requires **3.12+** (the SDK floor), which is why fin3's floor
+  was bumped from 3.11 to 3.12.
 
 ---
 

@@ -41,10 +41,11 @@ tests/
 └── providers/
     └── test_databento.py     # DatabentoProvider tests (3)
 docs/
-├── DESIGN.md                # Full system design document
 ├── USAGE.md                 # Internal usage guide (install, config, API examples)
-├── ROADMAP.md               # Project roadmap
-└── arcticdb_docs/           # Scraped ArcticDB documentation (see scripts/scrape_arcticdb.py)
+├── arcticdb_docs/           # Scraped ArcticDB documentation (see scripts/scrape_arcticdb.py)
+.docs/                       # Internal design + planning (not published)
+├── DESIGN.md                # Full system design document
+└── ROADMAP.md               # Project roadmap
 scripts/
 └── scrape_arcticdb.py       # ArcticDB docs scraper
 ```
@@ -64,7 +65,7 @@ This project uses **uv** for dependency and venv management. Always use `uv run`
 
 ## Coding Style & Naming Conventions
 
-- **Language**: Python 3.11+
+- **Language**: Python 3.12+
 - **Formatting**: ruff (Black-compatible)
 - **Type hints**: Use throughout; validated by mypy
 - **Naming**:
@@ -84,7 +85,7 @@ When working in this repository, you must strictly adhere to the following rules
 - **Testing:** All tests live in the `/tests` directory, completely separate from the `/src` directory. Use `pytest`.
 - **Error Handling:** Raise explicit exceptions (e.g., `ValueError`, custom domain exceptions). **Never** use `assert` statements in the `src/` code.
 - **Dependencies:** Do not modify `pyproject.toml` to add dependencies without explicit user authorization.
-- Update ROADMAP.md after completing items without errors or bugs. 
+- Update .docs/ROADMAP.md after completing items without errors or bugs.
 
 ## Testing Guidelines
 

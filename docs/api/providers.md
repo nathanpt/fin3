@@ -17,3 +17,6 @@ decorator-based `ProviderRegistry` and implement the `DataProvider` ABC.
 ::: fin3.providers.yfinance.YahooProvider
     options:
       show_root_heading: true
+::: fin3.providers.thetadata.ThetaDataProvider
+    options:
+      show_root_heading: true

@@ -34,7 +34,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       # Core + databento extra + dev group (mkdocs, mkdocstrings).
       # All are needed: mkdocstrings imports fin3 source to extract docstrings.

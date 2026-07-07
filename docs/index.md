@@ -1,6 +1,6 @@
 # fin3
 
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/nathanpt/fin3)
 [![Docs](https://github.com/nathanpt/fin3/actions/workflows/docs.yml/badge.svg)](https://github.com/nathanpt/fin3/actions/workflows/docs.yml)
 
