@@ -75,7 +75,16 @@ class RSSSampler:
         return self._baseline_rss
 
     def start(self) -> None:
-        """Begin sampling RSS in a background daemon thread."""
+        """Begin sampling RSS in a background daemon thread.
+
+        Captures the baseline RSS (the process footprint when sampling began)
+        so ``SampledMetrics.rss_delta_bytes`` reflects the increase
+        attributable to the tracked work rather than the absolute process size.
+        """
+        try:
+            self._baseline_rss = psutil.Process().memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            self._baseline_rss = 0
         self._peak_rss = self._baseline_rss
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
