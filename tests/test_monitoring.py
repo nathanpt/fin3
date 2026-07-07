@@ -342,6 +342,44 @@ class TestResourceTracker:
 
         assert provider.fetch is original_fetch
 
+    def test_tracker_restores_provider_when_enter_fails(
+        self, storage, monkeypatch
+    ) -> None:
+        """If ``__enter__`` raises (e.g. display setup fails), the provider
+        must still be restored.
+
+        The context-manager protocol does NOT call ``__exit__`` when
+        ``__enter__`` fails, so without the abort path the monkey-patch and
+        sampler thread would leak. (Contrast with
+        ``test_tracker_restores_provider_on_exception``, which raises inside
+        the ``with`` body and so exercises ``__exit__``, not ``__enter__``.)
+        """
+        original_fetch = MagicMock(return_value=pd.DataFrame())
+        provider = MagicMock()
+        provider.fetch = original_fetch
+
+        tracker = ResourceTracker(
+            storage=storage,
+            provider=provider,
+            library="test-lib",
+            symbols=["AAPL"],
+            resolution=Resolution.ONE_MINUTE,
+        )
+        # Force the last __enter__ step (display setup) to fail.
+        monkeypatch.setattr(
+            tracker,
+            "_setup_display",
+            MagicMock(side_effect=RuntimeError("display boom")),
+        )
+
+        with pytest.raises(RuntimeError, match="display boom"):
+            tracker.__enter__()
+
+        # __enter__ raised -> __exit__ never ran, but _abort_setup must have
+        # restored the provider and stopped the sampler (no leaked patch/thread).
+        assert provider.fetch is original_fetch
+        assert tracker._sampler._thread is None
+
     def test_tracker_writes_metrics_file(self, storage, monkeypatch) -> None:
         """Verify the metrics file is written during tracking (tmux mode).
 
