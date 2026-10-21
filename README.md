@@ -1,68 +1,68 @@
 # fin3
 
-**Declarative financial time-series data** — fetch, store, validate, and retrieve OHLCV bars with production-grade integrity guarantees.
+Financial time-series data tooling for downloading, normalizing, validating,
+storing, and retrieving OHLCV bars as pandas DataFrames. Built on
+[ArcticDB](https://arcticdb.io/) and [MinIO](https://min.io/), with Databento,
+Binance, Yahoo Finance, and Massive (formerly Polygon.io) provider implementations.
 
-Built on [ArcticDB](https://arcticdb.io/) + [MinIO](https://min.io/) (S3-compatible storage). Supports multiple data providers (Databento shipping, Polygon and Binance on the roadmap).
+Maintained by [Nathan Peet](https://github.com/nathanpt). Nathan uses fin3 to
+download, normalize, and prepare market data for analysis in his automated
+portfolio workflow. This describes data preparation and analysis, not live trade
+execution or investment performance; no external adoption is claimed.
 
-```python
-from fin3 import MarketDataFetcher, AssetType, Resolution, ClientConfig
+## Implemented functionality
 
-fetcher = MarketDataFetcher(ClientConfig.from_env())
+- Canonical OHLCV columns (`open`, `high`, `low`, `close`, `volume`) with UTC timestamps.
+- Exchange-session and continuous calendars, gap detection, incremental fetching,
+  and calendar alignment.
+- ArcticDB storage backed by MinIO/S3-compatible storage; local LMDB support for tests.
+- Raw-provider and post-alignment validation, metadata bootstrap, and per-symbol
+  cross-process file locking.
+- Integrity auditing, HTML inspection reports, defragmentation, and resource monitoring.
+- Standalone download, audit, inspection, and Databento normalization scripts.
 
-df = fetcher.get_data(
-    asset_type=AssetType.EQUITY_US,
-    provider="databento",
-    resolution=Resolution.ONE_HOUR,
-    symbols=["AAPL", "MSFT", "GOOG"],
-    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
-    end=datetime(2024, 3, 31, tzinfo=timezone.utc),
-)
-# Returns a clean, calendar-aligned MultiIndex DataFrame — ready for backtesting.
-```
+These are implemented capabilities, not a guarantee of error-free data or universal
+provider/asset coverage. Data availability, licensing, entitlements, and rate limits
+remain subject to each source.
 
----
+### Provider status
 
-## Features
+All four providers are registered in the public implementation. Live-verification
+notes below refer to historical public PR evidence, not a fresh live-API test of
+every provider on each checkout.
 
-| Area | Status | What It Does |
+| Provider key | Implemented scope | Verification and limitations |
 |---|---|---|
-| **OHLCV Schema** | ✅ Stable | Canonical `open`/`high`/`low`/`close`/`volume` schema, UTC timestamps, one symbol per ArcticDB symbol |
-| **Calendar Alignment** | ✅ Stable | NYSE, CME, and 24/7 continuous calendars — intraday bars aligned to trading sessions, null bars for no-trade minutes |
-| **Provider Abstraction** | ✅ Stable | Decorator-based `ProviderRegistry`, abstract `DataProvider` base |
-| **Databento Provider** | ✅ Shipping | Historical MBO/P → OHLCV, cost estimation, retry/backoff, dataset selection (XNAS.ITCH, ARCX.PILLAR) |
-| **Incremental Fetch** | ✅ Stable | Checks existing coverage, only fetches gaps — idempotent, no wasted API calls |
-| **Two-Stage Validation** | ✅ Stable | Stage 1: raw provider data (duplicates, monotonicity). Stage 2: post-reindex NaN semantics, OHLCV constraints |
-| **Integrity Audit** | ✅ Stable | 10+ vectorized checks, HTML dashboard, non-throwing `IntegrityReport` |
-| **Inspection** | ✅ Stable | Per-symbol stats (bar count, date range, null bars, storage size, health), HTML reports |
-| **MetadataStore** | ✅ Stable | 3-tier bootstrap (cache → provider → discovery fallback) for IPO/delist dates |
-| **Cross-Process Locking** | ✅ Stable | `fcntl.flock` per `(library, symbol)`, auto-release on crash, configurable timeout |
-| **Defragmentation** | ✅ Stable | Compact ArcticDB segments, dry-run mode, per-symbol reporting |
-| **Resource Monitoring** | ✅ Stable | Live tmux pane, `rich.live` info bar, or CI-friendly stderr summary — auto-enabled on `get_data()` |
-| **Pre-Fetch Cost Ceiling** | ✅ Stable | `max_cost` parameter raises `CostLimitExceededError` before expensive downloads |
-| **Data Normalization** | ✅ Stable | Convert raw Databento parquet → canonical schema, in-place or dry-run |
-| **Polygon Provider** | 🚧 Roadmap | Config model exists, provider class TBD |
-| **Binance Provider** | 🚧 Roadmap | Config model + crypto infrastructure exist, provider class TBD |
-| **Declarative Manifest** | 🚧 Roadmap | YAML-based dataset definitions, `fin3 ensure` / `fin3 sync` |
-| **Retrieval API** | 🚧 Roadmap | High-level `DataManager` with alignment, resampling, multi-format output |
-| **CLI** | 🚧 Roadmap | Unified `fin3` command (scripts exist individually) |
+| `databento` | Historical OHLCV via the Databento SDK; dataset selection, normalization, retry/backoff, and cost estimates | Requires the `databento` extra, an API key, and applicable data entitlements. This documentation audit did not run a paid download. |
+| `binance` | Public spot klines, pagination, retry/backoff, listing-bound probe; `BTC-USD` maps to `BTCUSDT` | [PR #1](https://github.com/nathanpt/fin3/pull/1) records live daily/hourly/minute downloads, including pagination. Some regions block the default host; `BinanceConfig.base_url` is configurable. USDT quotes are not USD quotes. |
+| `yahoo` | Yahoo Finance OHLCV through optional `yfinance`; raw prices by default, retry/backoff, lifecycle probe | [PR #3](https://github.com/nathanpt/fin3/pull/3) records live equity and crypto downloads. Unofficial, rate-limited research source with restricted intraday history; not a sole production data source. `4h` uses hourly data and core aggregation, not native Yahoo 4h bars. |
+| `massive` | Massive/Polygon REST aggregates; US-equity-focused configuration, native 4h bars, cursor pagination, raw prices by default | [PR #4](https://github.com/nathanpt/fin3/pull/4) added the implementation; [PR #5](https://github.com/nathanpt/fin3/pull/5) records live daily/minute data, pagination, and rate-limit handling. Requires an API key; history and access depend on plan. Lifecycle bounds can reflect the plan's history boundary rather than the true listing date. |
 
----
+`max_cost` checks provider-reported estimates before fetching. Databento queries
+its cost API; Binance and Yahoo report zero, while subscription-based Massive also
+reports zero. **A zero estimate does not make subscriptions or entitlements free,
+and `max_cost` does not cap Massive subscription charges.**
 
-## Quick Start
+## Quick start (from source)
 
-### 1. Install
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/). Use this repository
+checkout; these instructions do not assume that a published PyPI package is available.
 
 ```bash
-pip install fin3[databento]
+git clone https://github.com/nathanpt/fin3.git
+cd fin3
+uv sync --extra databento
 ```
 
-Or from source: `uv pip install -e /path/to/fin3[databento]`.
+For Yahoo support, add `--extra yfinance`. Binance and Massive use stdlib HTTP and
+need no provider-specific extra. ArcticDB storage still requires its core dependencies.
 
-### 2. Configure
+### Configure
 
-Create a `.env` file:
+Start a local MinIO instance and supply its credentials plus your Databento key in
+an uncommitted `.env` file (the credentials below are development placeholders):
 
-```bash
+```dotenv
 FIN3_MINIO__ENDPOINT=localhost:9000
 FIN3_MINIO__ACCESS_KEY=minioadmin
 FIN3_MINIO__SECRET_KEY=minioadmin
@@ -70,25 +70,20 @@ FIN3_PROVIDERS__DATABENTO__PROVIDER_TYPE=databento
 FIN3_PROVIDERS__DATABENTO__API_KEY=db-your-key-here
 ```
 
-Or configure in code:
+Do not use placeholder storage credentials in production. See the
+[usage guide](docs/USAGE.md) for storage configuration and other providers.
 
-```python
-from fin3 import ClientConfig, MarketDataFetcher
-from fin3.config.settings import MinioConfig, DatabentoConfig
+### Fetch and analyze
 
-config = ClientConfig(
-    minio=MinioConfig(endpoint="localhost:9000", access_key="minioadmin", secret_key="minioadmin"),
-    providers={"databento": DatabentoConfig(api_key="db-your-key-here")},
-)
-fetcher = MarketDataFetcher(config)
-```
-
-### 3. Fetch data
+The following performs network requests and may incur Databento charges. Choose
+symbols, dates, dataset, and entitlements appropriate to your account before running.
 
 ```python
 from datetime import datetime, timezone
-from fin3 import AssetType, Resolution
 
+from fin3 import AssetType, ClientConfig, MarketDataFetcher, Resolution
+
+fetcher = MarketDataFetcher(ClientConfig.from_env())
 df = fetcher.get_data(
     asset_type=AssetType.EQUITY_US,
     provider="databento",
@@ -97,158 +92,69 @@ df = fetcher.get_data(
     start=datetime(2024, 1, 2, tzinfo=timezone.utc),
     end=datetime(2024, 1, 2, 23, 59, tzinfo=timezone.utc),
 )
+aapl = df["AAPL"]
+closes = df[("AAPL", "close")]
 ```
 
-### 4. Use it
+`get_data()` checks existing coverage, fetches missing ranges, validates raw data,
+aligns bars to a calendar, validates again, and writes to ArcticDB before returning
+a symbol/field MultiIndex DataFrame. Library names follow
+`{asset_prefix}-{resolution}-{provider}`, for example `equities-1m-databento` or
+`crypto-1h-binance`. Missing in-session bars are represented by NaN OHLC and zero
+volume. Trading sessions depend on the asset calendar and daylight-saving time;
+NYSE hours are not a fixed UTC interval year-round.
 
-```python
-# Multi-symbol returns a MultiIndex DataFrame
-aapl = df["AAPL"]           # symbol sub-DataFrame
-closes = df[("AAPL", "close")]  # close price Series
+## Standalone tools
 
-# Feed into any backtesting framework
-# VectorBT-style: wide DataFrame
-# Backtrader-style: per-symbol panels
-```
-
-> 📖 **Full guide**: [docs/USAGE.md](docs/USAGE.md) — installation, config, crypto, futures, concurrency, monitoring, and more.
-
----
-
-## How It Works
-
-```
-get_data(symbols, start, end)
-    │
-    ├─ For each symbol:
-    │   ├─ Bootstrap metadata (IPO/delist dates via MetadataStore)
-    │   ├─ Check ArcticDB for existing coverage
-    │   ├─ Detect gaps (chunk-level comparison vs. calendar grid)
-    │   └─ For each gap:
-    │       ├─ Fetch from provider (with retry/backoff)
-    │       ├─ Validate (Stage 1: raw data structural checks)
-    │       ├─ Reindex to trading calendar grid
-    │       ├─ Validate (Stage 2: NaN semantics, OHLCV constraints)
-    │       └─ Write/update in ArcticDB (cross-process locked)
-    │
-    └─ Read from ArcticDB & return aligned MultiIndex DataFrame
-```
-
-Key properties:
-
-- **Idempotent** — calling `get_data()` twice for the same range is a no-op (second call reads from storage).
-- **Incremental** — if you have Jan–Mar and request Jan–Jun, only Apr–Jun is fetched.
-- **Calendar-aware** — equity gaps detected per trading day; crypto gaps per hour.
-- **Lock-guarded** — concurrent `get_data()` calls for the same symbol serialize via `flock`; no double-fetch, no clobbered writes.
-- **Validated twice** — structural checks before reindex, NaN-semantics strictness after.
-
----
-
-## Data Storage & Schema
-
-### Library Naming
-
-Libraries follow `{asset_prefix}-{resolution}-{provider}`:
-
-| Library | Asset | Resolution | Provider |
-|---|---|---|---|
-| `equities-1m-databento` | US Equities | 1 minute | Databento |
-| `equities-1h-databento` | US Equities | 1 hour | Databento |
-| `equities-1d-databento` | US Equities | 1 day | Databento |
-
-### Canonical OHLCV Schema
-
-```
-Index:  DatetimeIndex, tz=UTC, unnamed
-Columns:
-  open     float64  — Opening price
-  high     float64  — Highest price
-  low      float64  — Lowest price
-  close    float64  — Closing price
-  volume   float64  — Trade volume (0 for calendar-filled bars)
-```
-
-- All prices are `float64`. Volume is `float64` (allows NaN filling).
-- The index is always UTC. No timezone-naive data.
-- Missing bars within a trading session are filled with `volume=0, OHLC=NaN` when reindexed against the trading calendar.
-- Symbols are uppercase tickers (e.g. `AAPL`, `SPY`). One symbol per ArcticDB symbol within a library.
-
-### Timestamp Conventions
-
-| Resolution | Timestamp convention |
-|---|---|
-| 1m, 5m, 15m | Bar start time in UTC, aligned to NYSE session (14:30–20:00 UTC) |
-| 1h | Bar start time in UTC |
-| 1d | Midnight UTC (00:00:00+00:00) |
-
-Intraday bars are aligned to the [NYSE trading calendar](https://www.nyse.com/markets/hours-calendars). Pre-market and post-market bars are excluded.
-
----
-
-## CLI Tools
-
-The project ships several standalone scripts under `scripts/`. A unified `fin3` CLI is on the roadmap.
+A unified `fin3` command is not implemented. Run the existing scripts from the
+checkout with `uv run python scripts/<name>.py --help` before using them.
+Some commands download paid data or modify storage; review their options first.
 
 | Script | Purpose |
 |---|---|
-| `scripts/download_symbols.py` | Download data for multiple symbols with cost estimation |
-| `scripts/audit_library.py` | Run 10+ integrity checks, generate HTML dashboard |
-| `scripts/inspect_library.py` | Generate HTML library overview with per-symbol stats |
-| `scripts/defragment_library.py` | Compact ArcticDB segments (supports `--dry-run`) |
-| `scripts/normalize_databento.py` | Convert raw Databento parquet to canonical schema |
-| `scripts/run_bulk_download.py` | Orchestrate multi-symbol bulk download |
-| `scripts/fix_meta_rename.py` | Handle FB→META symbol rename gap |
+| [download_symbols.py](scripts/download_symbols.py) | Download data for multiple symbols with cost estimation |
+| [audit_library.py](scripts/audit_library.py) | Integrity checks and HTML dashboard |
+| [inspect_library.py](scripts/inspect_library.py) | Per-symbol library overview and HTML reports |
+| [defragment_library.py](scripts/defragment_library.py) | Compact ArcticDB segments, with dry-run support |
+| [normalize_databento.py](scripts/normalize_databento.py) | Convert raw Databento parquet to canonical schema |
+| [fix_meta_rename.py](scripts/fix_meta_rename.py) | Handle the FB-to-META symbol rename gap |
 
----
+## Unfinished / planned
 
-## Documentation
+- Declarative YAML dataset manifests and `fin3 ensure` / `fin3 sync`.
+- High-level `DataManager` retrieval, alignment, and multi-format output API.
+- A unified CLI.
+- Additional providers such as ThetaData; no ThetaData provider is in the public tree.
 
-| Document | Contents |
-|---|---|
-| [docs/USAGE.md](docs/USAGE.md) | Full usage guide: install, config, fetching data, crypto, futures, concurrency, monitoring, exception handling, adding providers |
-| [docs/dataset-comparison.md](docs/dataset-comparison.md) | Provider comparison (Databento/Massive/Yahoo/Binance) + Databento dataset cost analysis (XNAS.ITCH vs ARCX.PILLAR vs ...) |
-| [docs/resource-monitoring-notes.md](docs/resource-monitoring-notes.md) | Resource monitoring implementation details and optimizations |
+Binance, Yahoo, and Massive are implemented, not future provider stubs. The older
+[Massive implementation plan](PLAN.md) is historical context, not current status.
+The internal `.docs/ROADMAP.md` referenced in repository conventions is not included
+in the public checkout; this README summarizes public implemented/planned status.
 
----
+## Documentation and development
 
-## Project Status
+- [Usage guide](docs/USAGE.md): configuration, fetching, concurrency, monitoring,
+  exceptions, and adding providers. For installation, use the source instructions above.
+- [Provider comparison](docs/dataset-comparison.md).
+- [API reference source](docs/api/index.md).
+- [Resource monitoring notes](docs/resource-monitoring-notes.md).
+- [Repository guidelines](AGENTS.md).
 
-fin3 is **production-grade for its core path** (Databento equities/crypto/futures → ArcticDB/MinIO → aligned DataFrames) and actively developed. The key foundations are solid:
-
-- ✅ Stable storage schema and calendar alignment
-- ✅ Cross-process concurrency safety
-- ✅ Two-stage data validation pipeline
-- ✅ Integrity auditing with HTML dashboards
-- ✅ Resource monitoring (tmux, terminal, CI)
-- ✅ Incremental, idempotent data fetching
-
-**Under active development**: Polygon/Binance providers, declarative manifest system, high-level retrieval API, and unified CLI.
-
-The full roadmap (completed/planned features, priority guidance) lives in the internal `.docs/ROADMAP.md` and is intentionally not published.
-
----
-
-## Architecture
-
+```bash
+uv sync --all-extras
+uv run pytest tests/ -m "not integration"
+uv run ruff check .
+uv run mypy fin3/
 ```
-                     ┌─────────────┐
-                     │   Consumer   │  (backtesting, analysis, AI agents)
-                     │  (your code) │
-                     └──────┬──────┘
-                            │ get_data()
-                     ┌──────▼──────┐
-                     │  MarketData │
-                     │   Fetcher   │  Orchestrator with gap detection,
-                     │             │  locking, cost ceiling, monitoring
-                     └──┬─────┬────┘
-                        │     │
-              ┌─────────▼┐  ┌─▼──────────┐
-              │  Storage  │  │  Provider  │  Pluggable via decorator registry
-              │ (ArcticDB)│  │  (abstract)│
-              │  + MinIO  │  │ ┌─────────┐│
-              └───────────┘  │ │Databento││  ✅ Shipping
-                             │ │ Polygon ││  🚧 Roadmap
-                             │ │ Binance ││  🚧 Roadmap
-                             │ └─────────┘│
-                             └────────────┘
-```
+
+Live integration tests require explicit opt-in and relevant keys/infrastructure.
+Mocked tests alone do not establish live provider compatibility; see the live-test
+requirements in `AGENTS.md`. Do not point validation runs at production stores.
+
+## License
+
+Copyright 2026 Nathan Peet.
+
+Licensed under the [Apache License, Version 2.0](LICENSE). The license covers this
+repository's code; it does not grant rights to redistribute third-party market data
+or replace provider agreements.
