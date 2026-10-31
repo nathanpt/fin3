@@ -1,133 +1,82 @@
-# Repository Guidelines
+# fin3 — Agent Guide
 
-## Project Overview
+Declarative financial time-series library: fetch, validate, store, and retrieve
+OHLCV bars (ArcticDB on MinIO/S3; LMDB for tests). Pluggable providers return
+clean pandas DataFrames for backtesting. Python 3.11+, uv-managed.
 
-**fin3** is a Python library for declarative financial time-series data fetching, storage, and retrieval. It uses ArcticDB on MinIO for durable storage and supports multiple data providers (Databento, Polygon, Binance). Returns clean pandas DataFrames that any backtesting framework can consume.
+## Commands
 
-## Project Structure
+| Task | Command |
+|---|---|
+| Setup | `uv sync --all-extras` |
+| Unit tests | `uv run pytest tests/ -v` |
+| Integration (gated) | `uv run pytest tests/ -m integration -v` — needs real MinIO + provider API keys |
+| Lint | `uv run ruff check .` |
+| Format | `uv run ruff format .` |
+| Types | `uv run mypy fin3/` (strict) |
+| Docs site | `uv run mkdocs serve` |
 
-```
-fin3/
-├── __init__.py              # Public API exports
-├── core.py                  # MarketDataFetcher orchestrator
-├── exceptions.py            # Fin3Error hierarchy (9 classes)
-├── schemas.py               # AssetType, Resolution enums, OHLCV_COLUMNS, empty_ohlcv(), library_name()
-├── calendar/
-│   └── exchange.py          # CalendarStrategy protocol, ExchangeCalendarStrategy, ContinuousCalendarStrategy
-├── config/
-│   └── settings.py          # MinioConfig, DatabentoConfig, MassiveConfig, BinanceConfig, YahooConfig, ClientConfig
-├── metadata/
-│   └── asset_profile.py     # MetadataStore (IPO/delist date bootstrap with 3-tier fallback)
-├── providers/
-│   ├── __init__.py          # ProviderRegistry (decorator-based registration)
-│   ├── base.py              # Abstract DataProvider base class
-│   └── databento.py         # DatabentoProvider with retry/backoff
-├── storage/
-│   └── arctic.py            # ArcticStorage (MinIO/LMDB adapter with library caching)
-└── utils/
-    ├── date_utils.py         # ensure_utc(), detect_gaps(), _chunk_boundaries()
-    ├── logging.py            # structlog configure_logging()
-    └── validation.py         # validate_raw_provider_data() (Stage 1), validate_storage_artifact() (Stage 2)
-tests/
-├── conftest.py               # LMDB fixtures, make_ohlcv() helper
-├── test_calendar.py          # Calendar strategy tests (5)
-├── test_config.py            # Pydantic settings tests (5)
-├── test_core.py              # MarketDataFetcher E2E tests (4)
-├── test_exceptions.py        # Exception hierarchy tests (7)
-├── test_gap_detection.py     # Gap detection tests (4)
-├── test_metadata.py          # MetadataStore tests (3)
-├── test_storage.py           # ArcticStorage tests (7)
-├── test_validation.py        # Validation pipeline tests (12)
-└── providers/
-    └── test_databento.py     # DatabentoProvider tests (3)
-docs/
-├── DESIGN.md                # Full system design document
-├── USAGE.md                 # Internal usage guide (install, config, API examples)
-├── ROADMAP.md               # Project roadmap
-└── arcticdb_docs/           # Scraped ArcticDB documentation (see scripts/scrape_arcticdb.py)
-scripts/
-└── scrape_arcticdb.py       # ArcticDB docs scraper
-```
+## Hard constraints
 
-## Build, Test & Development Commands
+1. **Strict typing**: `uv run mypy fin3/` must stay clean. Lint/format via ruff
+   only — never flake8/black/isort.
+2. **No new dependencies** without explicit user authorization (never touch
+   `pyproject.toml` dependencies unprompted).
+3. **Explicit exceptions only**; never `assert` in `fin3/`. Domain errors live
+   in `fin3/exceptions.py`.
+4. **Providers are pure**: return DataFrames only, no ArcticDB/storage access;
+   register via `@ProviderRegistry.register("<name>")`.
+5. **Real-download verification is mandatory for any network provider** before
+   it is called done: run a real `fetch()` and inspect actual response shapes,
+   exercise pagination across ≥ 2 pages, and check `get_instrument_bounds()`
+   against a known symbol. Mocked tests are necessary but never sufficient.
+   Anything not live-verified must be reported as "code-complete but NOT
+   verified against the live API" — never as done/shipped.
+6. **Update `.docs/ROADMAP.md` and `.docs/PROGRESS.md`** after completing items.
 
-This project uses **uv** for dependency and venv management. Always use `uv run` instead of activating the venv manually.
+## Internal docs (`.docs/` — gitignored, local-only)
 
-- **Setup**: `uv sync --all-extras` — install all dependencies (core + optional)
-- **Add dependency**: `uv add <package>` — add to core deps
-- **Add dev dep**: `uv add --dev <package>` or `uv add --optional databento <package>`
-- **Run command**: `uv run <command>` — execute any command in the venv
-- **Tests**: `uv run pytest tests/ -v`
-- **Lint**: `uv run ruff check .`
-- **Format**: `uv run ruff format .`
-- **Type check**: `uv run mypy fin3/`
+`.docs/` is intentionally untracked (see `.docs/decisions/0001-*.md`). On a
+fresh clone it may be absent: restore the roadmap with
+`git show d536593^:docs/ROADMAP.md > .docs/ROADMAP.md` and recreate the rest
+from this guide.
 
-## Coding Style & Naming Conventions
+- `.docs/ARCHITECTURE.md` — module map, data flow, invariants, verification
+  ladder. **Read before changing system boundaries or module structure.**
+- `.docs/ROADMAP.md` — phased roadmap. **Read before selecting work; check off
+  completed items.**
+- `.docs/PROGRESS.md` — session state, verification results. **Update at
+  session end.**
+- `.docs/feature-list.json` — machine-readable feature contract. **Pick one
+  highest-priority non-passing feature; only change status/evidence fields.**
+- `.docs/exec-plans/` — `active/` for in-flight plans, `completed/` for
+  finished ones. **Archive plans when done.**
+- `.docs/decisions/` — MADR records. **Read before changing a decision they
+  constrain; write an ADR for choices affecting architecture, interfaces,
+  storage, security, dependencies, or major user-visible behavior.**
+- `.docs/references/` — pointers to external reference material.
+- `README.md` + `docs/` — published MkDocs site (GitHub Pages). **Keep
+  user-facing docs in sync with behavior changes.**
 
-- **Language**: Python 3.11+
-- **Formatting**: ruff (Black-compatible)
-- **Type hints**: Use throughout; validated by mypy
-- **Naming**:
-  - Libraries (ArcticDB): `{asset_type}-{resolution}-{provider}` (kebab-case, e.g. `equities-1m-databento`)
-  - Symbols: Uppercase tickers (`AAPL`), crypto with pair (`BTC-USD`)
-  - Files/modules: snake_case
-  - Classes: PascalCase
-- **Configuration**: Pydantic Settings with `.env` file support
-- **Logging**: structlog for structured JSON logging
+## Change discipline
 
-## Repository Coding Standards
+- Before adding code or scaffolding, inspect the relevant paths and ask whether
+  the requested outcome can be met by deleting, reusing, configuring, or
+  extending something already present.
+- Check existing implementations, platform facilities, standard-library
+  functions, and installed dependencies before adding new code or dependencies.
+- Implement the smallest complete change that satisfies the requirement. Do not
+  add speculative abstractions, generality, files, or configuration.
+- Do not reduce validation, error handling, security checks, accessibility,
+  tests, observability, or readability merely to reduce lines.
 
-When working in this repository, you must strictly adhere to the following rules:
+## Completion & reporting
 
-- **Type Safety:** All Python code must be strictly typed. `mypy` must pass without errors.
-- **Linting & Formatting:** We use `ruff` exclusively. Do not use `flake8`, `black`, or `isort`.
-- **Testing:** All tests live in the `/tests` directory, completely separate from the `/src` directory. Use `pytest`.
-- **Error Handling:** Raise explicit exceptions (e.g., `ValueError`, custom domain exceptions). **Never** use `assert` statements in the `src/` code.
-- **Dependencies:** Do not modify `pyproject.toml` to add dependencies without explicit user authorization.
-- Update ROADMAP.md after completing items without errors or bugs. 
-
-## Testing Guidelines
-
-- Framework: pytest
-- Aim for high coverage on core logic: gap detection, data validation, provider routing
-- Use fixtures for MinIO/ArcticDB mocks (or LMDB-backed local instances)
-- Test naming: `test_<feature>_<scenario>()` (e.g. `test_get_data_downloads_missing_range`)
-
-### Real download tests are mandatory for data providers
-
-**Any provider that hits a network API MUST be verified with at least one real,
-end-to-end download against the live service before it is considered done or
-merged.** Mocked-HTTP unit tests are necessary but **not sufficient** — they
-only prove the code handles the response shapes the author *assumed*, not the
-shapes the API actually returns. They give false confidence.
-
-Concretely, before marking a provider complete:
-
-- Run a real `fetch()` that returns rows and inspect the actual JSON response
-  shape (field names, timestamp units, pagination cursor format, error bodies).
-- Exercise pagination with a range large enough to span at least two pages.
-- Exercise `get_instrument_bounds()` against a known symbol.
-- Run the gated integration smoke (`tests/integration/test_provider_<name>.py`
-  with `-m integration` and a real key) and confirm it passes, not just skips.
-
-**If a real download test is NOT performed** (e.g. no key available, paid-only
-  source, network unavailable), you MUST call that out explicitly and loudly in
-  every status report, PR description, and release note — phrase it as
-  "code-complete but **not verified against the live API**", never as "done" or
-  "shipped". Do not let a green mocked-test suite stand in for real verification.
-  Do not merge to main as a shipped feature without operator sign-off on that
-  unverified status.
-
-## Commit & Pull Request Guidelines
-
-- Write clear, descriptive commit messages in imperative mood (e.g. "Add gap detection for multi-symbol queries")
-- Keep PRs focused on a single concern
-- Link PRs to relevant design decisions in `.docs/DESIGN.md` (internal, not published)
-
-## Architecture Notes
-
-- **Data flow**: `get_data()` → check ArcticDB coverage via `read(date_range=...)` → fetch missing ranges from provider → validate → store via `update(date_range=...)` → return DataFrame
-- **Provider pattern**: Abstract `DataProvider` base class; each provider implements `fetch()`. Register via `ProviderRegistry`. Providers return DataFrames only — no ArcticDB interaction.
-- **Storage**: ArcticDB libraries backed by MinIO. One library per asset_type/resolution/provider combination. `dynamic_schema=True` at library creation.
-- **Version management**: `prune_previous_versions=True` on all writes. Use snapshots for auditability.
-- **Output**: Standardized OHLCV DataFrames with UTC datetime index, multi-column support for multiple symbols.
+- Run the verification level matching the changed surface (see
+  `.docs/ARCHITECTURE.md` § Verification): focused units for isolated logic,
+  full unit suite + ruff + mypy for module boundaries, real end-to-end download
+  for any provider network path.
+- Record exact commands and observed results in `.docs/PROGRESS.md`.
+- State skipped or unavailable verification as `unverified`, never as passing.
+- Keep `README.md`, `docs/USAGE.md`, and `docs/dataset-comparison.md` in sync
+  when provider or config behavior changes.
