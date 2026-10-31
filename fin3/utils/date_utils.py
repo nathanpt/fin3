@@ -71,6 +71,13 @@ def detect_gaps(
     Gap boundaries are snapped to the nearest valid trading timestamp
     according to the calendar strategy (not raw user-requested boundaries).
 
+    Chunk coverage is chunk-END inclusive: a chunk counts as covered when any
+    existing bar falls in ``[chunk_start, chunk_end]`` (closed on both ends).
+    Bars are start-stamped, so the bar at ``chunk_start`` covers its chunk;
+    the inclusive upper bound additionally lets the bar stamped exactly at
+    ``chunk_end`` count for this chunk as well. The chunks are therefore NOT
+    half-open ``[start, end)`` ranges.
+
     If *existing_df* is None (symbol not found), the entire range is a gap.
     """
     start_ts = ensure_utc(start)
@@ -90,6 +97,8 @@ def detect_gaps(
         existing_index = existing_index.tz_localize("UTC")
 
     for chunk_start, chunk_end in chunks:
+        # Closed interval on both ends: a bar at exactly chunk_end covers
+        # this chunk (chunk-end-inclusive, not half-open).
         mask = (existing_index >= chunk_start) & (existing_index <= chunk_end)
         if not mask.any():
             missing_chunks.append((chunk_start, chunk_end))

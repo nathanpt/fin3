@@ -158,6 +158,17 @@ class DatabentoProvider(DataProvider):
                     ) from exc
                 if "timeout" in error_str:
                     if attempt < self._max_retries - 1:
+                        backoff = min(
+                            self._initial_backoff * (2**attempt),
+                            self._max_backoff,
+                        )
+                        logger.warning(
+                            "provider.timeout",
+                            provider="databento",
+                            symbol=symbol,
+                            backoff=backoff,
+                        )
+                        time.sleep(backoff)
                         continue
                     raise ProviderTimeoutError(
                         f"Databento timeout for {symbol}"

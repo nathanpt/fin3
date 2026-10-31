@@ -143,7 +143,12 @@ class TestMassiveProviderSmoke:
         assert "ipo_date" in bounds
         assert "delist_date" in bounds
         assert bounds["delist_date"] is None
+        # The probe spans 1970-01-01..today and returns the earliest bar the
+        # key can *access*, which is plan-dependent: on the free tier Massive
+        # truncates to the plan's history boundary (~2024-07 as of mid-2026),
+        # while a paid key resolves the true listing date (AAPL 1980-12-12).
+        # Both are honest lower bounds for gap detection, so assert only that
+        # the probe found a plausible bar within the requested range instead
+        # of pinning a plan-specific year.
         ipo = bounds["ipo_date"]
-        assert ipo is not None
-        # Free-tier boundary (~2024-07); a paid key would resolve 1980 instead.
-        assert ipo.year >= 2024
+        assert ipo is not None and ipo.year >= 1970

@@ -18,6 +18,7 @@ import multiprocessing as mp
 import os
 import queue
 import time
+import warnings
 from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import MagicMock
@@ -32,13 +33,9 @@ from fin3.providers import ProviderRegistry
 from fin3.schemas import AssetType, Resolution, library_name
 from fin3.storage.arctic import ArcticStorage
 from tests.conftest import make_ohlcv
+from tests.integration.conftest import TEST_BUCKET  # single shared integration bucket
 
 pytestmark = pytest.mark.integration
-
-# Single shared bucket used by the integration suite. Mirrors
-# tests/integration/conftest.py's TEST_BUCKET; replicated rather than imported
-# so this module does not depend on importing the conftest at module load.
-TEST_BUCKET = "test-integration-e2e"
 
 
 def _worker_get_data(
@@ -180,8 +177,12 @@ class TestConcurrentAccess:
         )
         try:
             setup._get_or_create_library(lib_name)
-        except Exception:
-            pass
+        except ValueError as exc:
+            # Only the benign "library already exists" condition is tolerated
+            # (arcticdb raises ValueError for a duplicate create); anything
+            # else is a real setup failure and must propagate.
+            if "already exists" not in str(exc):
+                raise
 
         out_queue: Any = mp.Queue()
         fetch_counter: Any = mp.Value("i", 0)
@@ -236,10 +237,16 @@ class TestConcurrentAccess:
 
         # Cleanup: remove the run-specific library from the shared bucket so
         # repeated runs stay tidy. Wrapped so a teardown hiccup never masks the
-        # real assertion above.
+        # real assertion above — but it is logged as a warning so a silent
+        # failure cannot strand garbage in the shared bucket unnoticed.
         try:
             arctic = setup.arctic_for(TEST_BUCKET)
             if lib_name in arctic.list_libraries():
                 arctic.delete_library(lib_name)
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(
+                f"integration cleanup: failed to delete library {lib_name!r} "
+                f"from bucket {TEST_BUCKET!r}: {exc!r}",
+                RuntimeWarning,
+                stacklevel=1,
+            )

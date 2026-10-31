@@ -8,7 +8,7 @@ import pytest
 from fin3.config.settings import DatabentoConfig
 from fin3.exceptions import ConfigurationError
 from fin3.providers import ProviderRegistry
-from fin3.providers.databento import _normalise
+from fin3.providers.databento import DatabentoProvider, _normalise
 
 
 class TestProviderRegistry:
@@ -18,7 +18,7 @@ class TestProviderRegistry:
         config = DatabentoConfig(api_key="test_key")
         registry = ProviderRegistry({"databento": config})
         provider = registry.get("databento")
-        assert provider is not None
+        assert isinstance(provider, DatabentoProvider)
 
     def test_get_unknown_provider_raises(self) -> None:
         """Requesting a provider not in configs raises ConfigurationError."""

@@ -548,7 +548,14 @@ def _align_symbols(per_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
         union_index = union_index.union(df.index)  # type: ignore[arg-type]
 
     if len(union_index) == 0:
-        return pd.DataFrame()
+        # No bars anywhere: keep the (symbol, field) column contract instead of
+        # returning a bare, column-less frame (e.g. weekend-only requests).
+        return pd.DataFrame(
+            index=pd.DatetimeIndex([], tz="UTC"),
+            columns=pd.MultiIndex.from_product(
+                [list(per_symbol), list(OHLCV_COLUMNS)]
+            ),
+        )
 
     aligned: dict[str, pd.DataFrame] = {}
     for symbol, df in per_symbol.items():

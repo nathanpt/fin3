@@ -15,6 +15,7 @@ import pytest
 from fin3.schemas import AssetType, Resolution, library_name
 from fin3.storage.arctic import ArcticStorage
 
+pytestmark = pytest.mark.integration
 
 LIBRARY_1D = library_name(AssetType.EQUITY_US, Resolution.ONE_DAY, "databento")
 
@@ -36,8 +37,19 @@ class TestSmaCrossoverBacktest:
         if len(close) <= 50:
             pytest.skip("Need at least 50 non-null bars for SMA50")
 
+        # Stored-data quality (the fin3 part of this test):
+        assert isinstance(aapl_daily.index, pd.DatetimeIndex), (
+            "Close index should be a DatetimeIndex"
+        )
+        assert aapl_daily.index.tz is not None, "Index should be timezone-aware"
+        assert (close > 0).all(), "Close prices should be positive"
+
         sma20 = close.rolling(20).mean()
         sma50 = close.rolling(50).mean()
+
+        # Post-warmup NaN in an SMA would mean holes in the stored closes.
+        assert sma20.iloc[19:].notna().all(), "SMA20 has unexpected NaN"
+        assert sma50.iloc[49:].notna().all(), "SMA50 has unexpected NaN"
 
         # Signals: +1 when SMA20 crosses above SMA50, -1 when below
         cross = (sma20 > sma50).astype(int) - (sma20 < sma50).astype(int)
@@ -46,13 +58,6 @@ class TestSmaCrossoverBacktest:
         # At least some non-zero signals over ~2000 bars
         nonzero = signals[signals != 0]
         assert len(nonzero) > 0, "Expected at least one crossover signal"
-
-        # SMA values should be valid where we have enough data
-        assert sma20.iloc[19:].notna().all(), "SMA20 has unexpected NaN"
-        assert sma50.iloc[49:].notna().all(), "SMA50 has unexpected NaN"
-
-        # Basic sanity: close prices positive
-        assert (close > 0).all(), "Close prices should be positive"
 
     def test_daily_returns_distribution(self, aapl_daily: pd.DataFrame) -> None:
         """Verify daily returns have reasonable statistical properties."""

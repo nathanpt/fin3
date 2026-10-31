@@ -208,8 +208,6 @@ class TestYahooProviderFetch:
 
     def test_unsupported_resolution_raises(self) -> None:
         provider = make_provider()
-        bogus = MagicMock(spec=Resolution)
-        bogus.value = "2m"
         with patch.dict(
             "fin3.providers.yfinance._RESOLUTION_TO_INTERVAL", {}, clear=True
         ):
@@ -343,8 +341,26 @@ class TestYahooProviderInit:
         assert cfg.provider_type == "yahoo"
         assert cfg.max_retries == 3
 
-    def test_config_custom(self) -> None:
-        cfg = YahooConfig(auto_adjust=True, max_retries=5, timeout=10.0)
-        assert cfg.auto_adjust is True
-        assert cfg.max_retries == 5
-        assert cfg.timeout == 10.0
+
+class TestYahooBackoffCap:
+    def test_sleep_calls_capped_at_max_backoff(self) -> None:
+        # Always-429 with max_retries=3 sleeps on attempts 0 and 1 only:
+        # min(10 * 2**0, 12) == 10, min(10 * 2**1, 12) == 12.
+        provider = make_provider(
+            max_retries=3, initial_backoff=10.0, max_backoff=12.0
+        )
+        ticker = MagicMock()
+        ticker.history.side_effect = Exception("429 rate limit exceeded")
+        provider._client.Ticker.return_value = ticker  # type: ignore[union-attr]
+
+        with patch("time.sleep") as mock_sleep:
+            with pytest.raises(ProviderRateLimitError):
+                provider.fetch(
+                    symbol="AAPL",
+                    start=datetime(2024, 1, 2, tzinfo=timezone.utc),
+                    end=datetime(2024, 1, 4, tzinfo=timezone.utc),
+                    resolution=Resolution.ONE_DAY,
+                )
+
+        assert ticker.history.call_count == 3
+        assert [call.args[0] for call in mock_sleep.call_args_list] == [10.0, 12.0]

@@ -3,8 +3,10 @@
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-from fin3.metadata.asset_profile import MetadataStore
-from fin3.schemas import Resolution
+import pandas as pd
+
+from fin3.metadata.asset_profile import METADATA_SYMBOL_PREFIX, MetadataStore
+from fin3.schemas import METADATA_LIBRARY, Resolution
 from fin3.storage.arctic import ArcticStorage
 from tests.conftest import make_ohlcv
 
@@ -73,7 +75,10 @@ class TestBootstrapMetadata:
             datetime(2024, 1, 2, tzinfo=timezone.utc),
             resolution=Resolution.ONE_HOUR,
         )
+        # Core semantic: the derived ipo is the FIRST bar of the discovery
+        # fetch (index[0] -> to_pydatetime()), not merely "some timestamp".
         assert ipo is not None
+        assert ipo == provider.fetch.return_value.index[0]
         provider.fetch.assert_called_once_with(
             symbol="NEWTICKER",
             start=datetime(2024, 1, 1, tzinfo=timezone.utc),
@@ -93,7 +98,9 @@ class TestBootstrapMetadata:
             datetime(2024, 1, 1, tzinfo=timezone.utc),
             datetime(2024, 1, 2, tzinfo=timezone.utc),
         )
+        # Same core semantic as test_discovery_fallback: first discovered bar.
         assert ipo is not None
+        assert ipo == provider.fetch.return_value.index[0]
         provider.fetch.assert_called_once_with(
             symbol="NEWTICKER2",
             start=datetime(2024, 1, 1, tzinfo=timezone.utc),
@@ -118,3 +125,53 @@ class TestBootstrapMetadata:
         cached = store.get_lifecycle_bounds("BADDATA")
         assert cached is not None
         assert cached["ipo_date"] is None
+
+
+class TestCorruptCachePinnedBehaviour:
+    def test_corrupt_cache_row_poisons_bootstrap(
+        self, storage: ArcticStorage
+    ) -> None:
+        """PINNED-AS-KNOWN-ISSUE — negative-cache poisoning (feat-021/gates).
+
+        ``get_lifecycle_bounds`` treats any non-empty ``__meta__<SYMBOL>``
+        row as a cache hit. A row written with wrong/missing columns makes
+        ``row.get("ipo_date")``/``row.get("delist_date")`` return None, so
+        ``bootstrap_metadata`` takes the cache-hit path and returns
+        ``(None, None)`` **without ever calling the provider** — no ref API
+        attempt, no discovery fetch. Worse, the all-fail bootstrap path
+        itself stores ``None`` bounds, so one bad run poisons every later
+        bootstrap for that symbol.
+
+        This test deliberately pins current behaviour; update it together
+        with the source fix, not before.
+        """
+        store = MetadataStore(storage)
+        storage.write(
+            METADATA_LIBRARY,
+            f"{METADATA_SYMBOL_PREFIX}POISON",
+            pd.DataFrame([{"wrong_column": "junk"}]),
+        )
+        provider = MagicMock()
+
+        ipo, delist = store.bootstrap_metadata(
+            "POISON", provider,
+            datetime(2024, 1, 1, tzinfo=timezone.utc),
+            datetime(2024, 1, 2, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
+        )
+        assert ipo is None
+        assert delist is None
+        # Poisoned: the provider is never consulted (ref API or discovery).
+        provider.get_instrument_bounds.assert_not_called()
+        provider.fetch.assert_not_called()
+
+        # ...and the poisoning persists across repeated bootstraps.
+        ipo2, delist2 = store.bootstrap_metadata(
+            "POISON", provider,
+            datetime(2024, 1, 1, tzinfo=timezone.utc),
+            datetime(2024, 1, 2, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
+        )
+        assert (ipo2, delist2) == (None, None)
+        provider.get_instrument_bounds.assert_not_called()
+        provider.fetch.assert_not_called()

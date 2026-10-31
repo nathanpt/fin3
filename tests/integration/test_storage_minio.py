@@ -14,6 +14,8 @@ import pytest
 from fin3.storage.arctic import ArcticStorage
 from tests.conftest import make_ohlcv
 
+pytestmark = pytest.mark.integration
+
 
 class TestStorageRoundTrip:
     """Write, read, update, and verify data on real MinIO/ArcticDB."""
@@ -74,6 +76,67 @@ class TestStorageRoundTrip:
         ] == pytest.approx(999.0)
         # Verify the untouched rows are unchanged
         assert result.iloc[0]["close"] == pytest.approx(100.2)
+
+    def test_read_columns_returns_only_close_with_intact_index(
+        self, minio_storage: ArcticStorage, unique_library: str
+    ) -> None:
+        df = make_ohlcv("2024-01-02 09:30", periods=10)
+        minio_storage.write(unique_library, "AAPL", df)
+
+        result = minio_storage.read(unique_library, "AAPL", columns=["close"])
+        assert result is not None
+        # Exactly the close column; the UTC index is always returned regardless.
+        assert list(result.columns) == ["close"]
+        assert result.index.tz is not None
+        assert result.index.equals(df.index)
+        pd.testing.assert_series_equal(
+            result["close"], df["close"], check_exact=True, check_freq=False
+        )
+
+    def test_symbols_with_different_schemas_coexist(
+        self, minio_storage: ArcticStorage, unique_library: str
+    ) -> None:
+        """dynamic_schema=True lets symbols with different column sets share a library."""
+        base = make_ohlcv("2024-01-02 09:30", periods=5)
+        minio_storage.write(unique_library, "AAPL", base)
+
+        extended = make_ohlcv("2024-01-02 09:30", periods=4)
+        extended["vwap"] = extended["close"] * 1.01
+        minio_storage.write(unique_library, "MSFT", extended)
+
+        # The first symbol still reads back exactly its 5 written columns.
+        aapl = minio_storage.read(unique_library, "AAPL")
+        assert aapl is not None
+        assert list(aapl.columns) == ["open", "high", "low", "close", "volume"]
+        pd.testing.assert_frame_equal(aapl, base, check_exact=True, check_freq=False)
+
+        # The second symbol reads back with its extra column.
+        msft = minio_storage.read(unique_library, "MSFT")
+        assert msft is not None
+        assert list(msft.columns) == ["open", "high", "low", "close", "volume", "vwap"]
+        pd.testing.assert_frame_equal(msft, extended, check_exact=True, check_freq=False)
+
+    def test_update_prunes_previous_versions(
+        self, minio_storage: ArcticStorage, unique_library: str
+    ) -> None:
+        """write() and update() always prune_previous_versions, so exactly one
+        version remains after a write + update cycle."""
+        df = make_ohlcv("2024-01-02 09:30", periods=10)
+        minio_storage.write(unique_library, "AAPL", df)
+
+        updated = make_ohlcv("2024-01-02 09:35", periods=2)
+        minio_storage.update(
+            unique_library,
+            "AAPL",
+            updated,
+            date_range=(
+                updated.index[0].to_pydatetime(),
+                updated.index[-1].to_pydatetime(),
+            ),
+        )
+
+        lib = minio_storage._get_or_create_library(unique_library)
+        assert len(lib.list_versions("AAPL")) == 1
 
     def test_read_with_date_range(
         self, minio_storage: ArcticStorage, unique_library: str

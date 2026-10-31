@@ -59,6 +59,26 @@ def _find_ohlcv_violations(df: pd.DataFrame) -> pd.Series:
     return all_present & ~ok
 
 
+def _find_negative_prices(df: pd.DataFrame) -> pd.Series:
+    """Return a boolean Series (True = at least one negative OHLC price).
+
+    NaN prices never count as negative; whether NaN is legal at all is
+    governed by each stage's volume semantics.
+    """
+    neg = pd.Series(False, index=df.index)
+    for col in ("open", "high", "low", "close"):
+        if col in df.columns:
+            neg = neg | (df[col] < 0)
+    return neg
+
+
+def _has_negative_volume(df: pd.DataFrame) -> bool:
+    """True when any volume is negative. NaN never counts; zero stays legal."""
+    if "volume" not in df.columns:
+        return False
+    return bool((df["volume"] < 0).any())
+
+
 # ---------------------------------------------------------------------------
 # Throwing wrappers — used by the two-stage write-path validation pipeline.
 # ---------------------------------------------------------------------------
@@ -97,10 +117,26 @@ def _check_ohlcv_constraints_vectorized(df: pd.DataFrame, label: str) -> None:
         )
 
 
+def _check_signs(df: pd.DataFrame, label: str) -> None:
+    """Sign gate. Negative prices or volume are data corruption; zero volume
+    and NaN (where the stage's own semantics allow it) stay legal."""
+    neg_price = _find_negative_prices(df)
+    if neg_price.any():
+        bad_idx = neg_price[neg_price].index[0]
+        row = df.loc[bad_idx]
+        cols = [c for c in ("open", "high", "low", "close") if c in df.columns and row[c] < 0]
+        raise DataValidationError(f"[{label}] Negative price at {bad_idx} in {cols}")
+    if _has_negative_volume(df):
+        neg_vol = df["volume"] < 0
+        bad_idx = neg_vol[neg_vol].index[0]
+        raise DataValidationError(f"[{label}] Negative volume at {bad_idx}")
+
+
 def validate_raw_provider_data(df: pd.DataFrame, resolution: Resolution) -> None:
     """Stage 1: structural validation on raw provider data (pre-reindex).
 
     Accepts partial/sparse data. Rejects corrupt structural issues.
+    Prices and volume must be non-negative.
     """
     label = "stage1"
 
@@ -116,6 +152,8 @@ def validate_raw_provider_data(df: pd.DataFrame, resolution: Resolution) -> None
 
     if df["volume"].isna().any():
         raise SchemaValidationError(f"[{label}] volume must never be NaN")
+
+    _check_signs(df, label)
 
     ohlc_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
     if ohlc_cols:
@@ -137,7 +175,8 @@ def validate_storage_artifact(df: pd.DataFrame, resolution: Resolution) -> None:
     """Stage 2: strict validation on the fully-padded storage artifact (post-reindex).
 
     The artifact must conform to the NaN semantics: volume=0 implies all OHLC NaN,
-    volume>0 implies no NaN in any OHLCV column.
+    volume>0 implies no NaN in any OHLCV column. Prices and volume must be
+    non-negative.
     """
     label = "stage2"
 
@@ -161,6 +200,8 @@ def validate_storage_artifact(df: pd.DataFrame, resolution: Resolution) -> None:
     if vol.isna().any():
         first_na = vol[vol.isna()].index[0]
         raise DataValidationError(f"[{label}] volume must never be NaN (at {first_na})")
+
+    _check_signs(df, label)
 
     positive_vol = vol > 0
     if (positive_vol & ohlc_any_nan).any():

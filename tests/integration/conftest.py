@@ -11,6 +11,7 @@ Run with:
 """
 
 import os
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
@@ -45,7 +46,10 @@ def _has_integration_env() -> bool:
     )
 
 
-pytestmark = pytest.mark.integration
+# NOTE: `pytestmark` set here would be inert (pytest only reads it from test
+# modules), so every integration test module declares it itself. Default
+# exclusion comes from pyproject addopts (`-m "not integration"`); opt in with
+# `pytest -m integration`.
 
 if not _has_integration_env():
     collect_ignore_glob = ["*.py"]
@@ -118,14 +122,21 @@ def unique_library(minio_storage: ArcticStorage) -> Generator[str, None, None]:
     _lib_counter += 1
     name = f"test-integration-{_lib_counter}"
     yield name
-    # cleanup: delete the library from the shared test bucket
+    # cleanup: delete the library from the shared test bucket. A teardown
+    # hiccup must not mask the test result, but it is surfaced as a warning
+    # so a silent failure cannot strand garbage in the shared bucket.
     try:
         arctic = minio_storage.arctic_for(TEST_BUCKET)
         if name in arctic.list_libraries():
             arctic.delete_library(name)
         minio_storage._library_cache.pop(name, None)
-    except Exception:
-        pass
+    except Exception as exc:
+        warnings.warn(
+            f"integration cleanup: failed to delete library {name!r} "
+            f"from bucket {TEST_BUCKET!r}: {exc!r}",
+            RuntimeWarning,
+            stacklevel=1,
+        )
 
 
 # ---------------------------------------------------------------------------

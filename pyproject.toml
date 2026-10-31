@@ -37,6 +37,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+addopts = ["-m", "not integration"]
 markers = [
     "integration: marks tests that require real infrastructure (Databento API key, MinIO)",
 ]

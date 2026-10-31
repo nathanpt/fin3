@@ -187,7 +187,12 @@ def _profile_symbol(
     issues_summary: dict[str, int] = {}
 
     if include_integrity:
-        assert calendar_strategy is not None  # guaranteed by guard above
+        if calendar_strategy is None:
+            # Unreachable via inspect_library (guarded at function entry);
+            # kept as an explicit raise for direct callers and mypy narrowing.
+            raise ValueError(
+                "calendar_strategy is required when include_integrity=True"
+            )
         grid = calendar_strategy.generate_grid(first_bar, last_bar, resolution)
         report = check_integrity(df, grid, resolution)
         issue_count = len(report.issues)

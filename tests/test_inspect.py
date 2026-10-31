@@ -2,19 +2,44 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from fin3.calendar.exchange import ContinuousCalendarStrategy
-from fin3.inspect import inspect_library
+from fin3.inspect import SymbolProfile, _profile_symbol, inspect_library
 from fin3.schemas import Resolution
 from fin3.storage.arctic import ArcticStorage
-from tests.conftest import make_ohlcv
+from tests.conftest import make_empty_ohlcv, make_ohlcv
 
 
 def _write_sym(storage: ArcticStorage, library: str, symbol: str, df: pd.DataFrame) -> None:
     storage.write(library, symbol, df)
+
+
+def _ghost_storage(df: pd.DataFrame | None) -> ArcticStorage:
+    """Storage double: ``GHOST`` is listed, ``read()`` returns *df* (or None)."""
+    storage = MagicMock()
+    storage.list_symbols.return_value = ["GHOST"]
+    storage.read.return_value = df
+    storage.get_symbol_size.return_value = 1234
+    return storage
+
+
+def _assert_empty_ghost_profile(profile: SymbolProfile) -> None:
+    """Pin every field of the df is None / empty branch's profile."""
+    assert isinstance(profile, SymbolProfile)
+    assert profile.symbol == "GHOST"
+    assert profile.first_bar is None
+    assert profile.last_bar is None
+    assert profile.total_bars == 0
+    assert profile.null_bars == 0
+    assert profile.total_volume == 0.0
+    assert profile.size_bytes == 1234
+    assert profile.issue_count == 0
+    assert profile.issues_summary == {}
 
 
 class TestInspectEmptyLibrary:
@@ -26,12 +51,6 @@ class TestInspectEmptyLibrary:
         assert result.date_range == (None, None)
         assert result.symbols == []
 
-    def test_empty_library_to_dataframe(self, storage: ArcticStorage) -> None:
-        result = inspect_library(storage, "empty-lib", Resolution.ONE_MINUTE)
-        df = result.to_dataframe()
-        assert isinstance(df, pd.DataFrame)
-        assert len(df) == 0
-
     def test_empty_library_summary(self, storage: ArcticStorage) -> None:
         result = inspect_library(storage, "empty-lib", Resolution.ONE_MINUTE)
         s = result.summary()
@@ -39,6 +58,69 @@ class TestInspectEmptyLibrary:
         assert s["total_rows"] == 0
         assert s["date_range"] == (None, None)
         assert s["symbols_with_issues"] == 0
+
+
+class TestProfileSymbolWithoutData:
+    """Unit tests for the ``df is None`` / empty branch of ``_profile_symbol``.
+
+    A symbol ``list_symbols`` reports but with no readable frame must profile
+    as empty — not crash and not fabricate bars.
+    """
+
+    def test_read_none_returns_empty_profile(self) -> None:
+        profile = _profile_symbol(
+            _ghost_storage(None),
+            "test-lib",
+            "GHOST",
+            Resolution.ONE_MINUTE,
+            include_integrity=False,
+            calendar_strategy=None,
+        )
+        _assert_empty_ghost_profile(profile)
+
+    def test_empty_frame_returns_empty_profile(self) -> None:
+        profile = _profile_symbol(
+            _ghost_storage(make_empty_ohlcv()),
+            "test-lib",
+            "GHOST",
+            Resolution.ONE_MINUTE,
+            include_integrity=False,
+            calendar_strategy=None,
+        )
+        _assert_empty_ghost_profile(profile)
+
+    def test_read_none_with_integrity_enabled_skips_checks(self) -> None:
+        # The empty branch returns before any grid/integrity work runs, so no
+        # calendar grid is needed and no issues can be raised.
+        profile = _profile_symbol(
+            _ghost_storage(None),
+            "test-lib",
+            "GHOST",
+            Resolution.ONE_MINUTE,
+            include_integrity=True,
+            calendar_strategy=ContinuousCalendarStrategy(),
+        )
+        _assert_empty_ghost_profile(profile)
+
+    def test_inspect_library_profiles_listed_symbol_without_data(self) -> None:
+        storage = MagicMock()
+        storage.list_symbols.return_value = ["GHOST"]
+        storage.read.return_value = None
+        storage.get_symbol_size.return_value = 1234
+
+        result = inspect_library(
+            storage,
+            "ghost-lib",
+            Resolution.ONE_MINUTE,
+        )
+        assert result.library == "ghost-lib"
+        assert result.symbol_count == 1
+        assert result.total_rows == 0
+        assert result.date_range == (None, None)
+        assert len(result.symbols) == 1
+        _assert_empty_ghost_profile(result.symbols[0])
+        # Integrity not requested: the read is column-pruned to volume only.
+        storage.read.assert_called_once_with("ghost-lib", "GHOST", columns=["volume"])
 
 
 class TestInspectSingleSymbol:
@@ -201,18 +283,6 @@ class TestToDataframe:
         assert out.iloc[1]["symbol"] == "CLEAN"
 
 
-class TestMissingSymbol:
-    def test_symbol_not_found_returns_empty_profile(self, storage: ArcticStorage) -> None:
-        # Library exists but symbol was deleted / never written
-        df = make_ohlcv("2024-01-02 09:30", periods=3, freq="1min")
-        _write_sym(storage, "test-lib", "AAPL", df)
-
-        # Read AAPL successfully, but list_symbols only returns AAPL
-        result = inspect_library(storage, "test-lib", Resolution.ONE_MINUTE)
-        assert len(result.symbols) == 1
-        assert result.symbols[0].symbol == "AAPL"
-
-
 class TestInspectParameterValidation:
     def test_include_integrity_without_calendar_strategy_raises(self, storage: ArcticStorage) -> None:
         df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
@@ -236,11 +306,8 @@ class TestInspectSizeBytes:
         result = inspect_library(storage, "test-lib", Resolution.ONE_MINUTE)
         sym = result.symbols[0]
         assert sym.size_bytes > 0
-
-    def test_empty_symbol_has_zero_size(self, storage: ArcticStorage) -> None:
-        # list_symbols returns nothing, so no profiles are created
-        result = inspect_library(storage, "test-lib", Resolution.ONE_MINUTE)
-        assert len(result.symbols) == 0
+        # Delegation: the profile must report exactly what storage reports.
+        assert sym.size_bytes == storage.get_symbol_size("test-lib", "AAPL")
 
     def test_summary_includes_total_size(self, storage: ArcticStorage) -> None:
         df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")

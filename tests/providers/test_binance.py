@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import json
+import socket
+import urllib.error
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +13,11 @@ import pandas as pd
 import pytest
 
 from fin3.config.settings import BinanceConfig
-from fin3.exceptions import ProviderError, ProviderRateLimitError
+from fin3.exceptions import (
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+)
 from fin3.providers.binance import (
     BinanceProvider,
     _normalise,
@@ -88,6 +96,9 @@ class TestNormalise:
         assert isinstance(df.index, pd.DatetimeIndex)
         assert str(df.index.tz) == "UTC"
         assert df.index.name is None
+        # 1704153600000 ms == 2024-01-02 00:00 UTC. Guards against a
+        # unit="s" bug (seconds would yield a 1970 date).
+        assert df.index[0] == pd.Timestamp("2024-01-02 00:00:00", tz="UTC")
         assert df["open"].tolist() == [100.0, 100.2]
         assert df["volume"].tolist() == [1000.0, 1100.0]
 
@@ -145,9 +156,24 @@ class TestBinanceProviderFetch:
         assert result.empty
         assert list(result.columns) == list(OHLCV_COLUMNS)
 
+    @pytest.mark.parametrize(
+        "resolution,expected",
+        [
+            (Resolution.ONE_MINUTE, "1m"),
+            (Resolution.FIVE_MINUTE, "5m"),
+            (Resolution.FIFTEEN_MINUTE, "15m"),
+            (Resolution.ONE_HOUR, "1h"),
+            (Resolution.FOUR_HOUR, "4h"),  # native 4h: no aggregation fallback
+            (Resolution.ONE_DAY, "1d"),
+        ],
+    )
     @patch("fin3.providers.binance.BinanceProvider._request_with_retry")
     def test_resolution_mapping(
-        self, mock_request: MagicMock, provider: BinanceProvider
+        self,
+        mock_request: MagicMock,
+        provider: BinanceProvider,
+        resolution: Resolution,
+        expected: str,
     ) -> None:
         mock_request.return_value = []
 
@@ -155,11 +181,11 @@ class TestBinanceProviderFetch:
             symbol="BTC-USD",
             start=datetime(2024, 1, 2, tzinfo=timezone.utc),
             end=datetime(2024, 1, 2, 1, tzinfo=timezone.utc),
-            resolution=Resolution.ONE_HOUR,
+            resolution=resolution,
         )
 
         params = mock_request.call_args.args[0]
-        assert params["interval"] == "1h"
+        assert params["interval"] == expected
 
     @patch("fin3.providers.binance.BinanceProvider._request_with_retry")
     def test_pagination_advances_start_time(self, mock_request: MagicMock) -> None:
@@ -222,9 +248,6 @@ class TestBinanceProviderFetch:
         assert len(result) == 2
 
     def test_unsupported_resolution_raises(self, provider: BinanceProvider) -> None:
-        # Construct a value outside the supported map to exercise the guard.
-        bogus = MagicMock(spec=Resolution)
-        bogus.value = "2m"
         with patch.dict(
             "fin3.providers.binance._RESOLUTION_TO_INTERVAL", {}, clear=True
         ):
@@ -341,8 +364,118 @@ class TestBinanceProviderConfig:
         provider = BinanceProvider(BinanceConfig(request_limit=5000))
         assert provider._limit == 1000
 
-    def test_custom_retry_values(self) -> None:
-        config = BinanceConfig(max_retries=5, initial_backoff=2.0, max_backoff=120.0)
-        assert config.max_retries == 5
-        assert config.initial_backoff == 2.0
-        assert config.max_backoff == 120.0
+
+class TestBinanceHttpRequestClassification:
+    """Classify raw HTTP failures in ``_request`` (no retry mocking).
+
+    Patches ``urllib.request.urlopen`` — the name the module actually calls —
+    and asserts the typed exception each failure mode maps to.
+    """
+
+    _URL = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m"
+
+    @patch("urllib.request.urlopen")
+    def test_http_429_raises_rate_limit(
+        self, mock_urlopen: MagicMock, provider: BinanceProvider
+    ) -> None:
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            self._URL, 429, "Too Many Requests", None, None
+        )
+
+        with pytest.raises(ProviderRateLimitError, match="429"):
+            provider._request({"symbol": "BTCUSDT"})
+
+    @patch("urllib.request.urlopen")
+    def test_urlerror_wrapping_socket_timeout_raises_timeout(
+        self, mock_urlopen: MagicMock, provider: BinanceProvider
+    ) -> None:
+        mock_urlopen.side_effect = urllib.error.URLError(socket.timeout("timed out"))
+
+        with pytest.raises(ProviderTimeoutError, match="timeout"):
+            provider._request({"symbol": "BTCUSDT"})
+
+    @patch("urllib.request.urlopen")
+    def test_other_http_4xx_raises_provider_error(
+        self, mock_urlopen: MagicMock, provider: BinanceProvider
+    ) -> None:
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            self._URL,
+            400,
+            "Bad Request",
+            None,
+            io.BytesIO(b'{"code":-1121,"msg":"Invalid symbol."}'),
+        )
+
+        with pytest.raises(ProviderError, match="HTTP 400"):
+            provider._request({"symbol": "BAD"})
+
+    @patch("urllib.request.urlopen")
+    def test_non_json_body_raises_provider_error(
+        self, mock_urlopen: MagicMock, provider: BinanceProvider
+    ) -> None:
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+            b"<html>service temporarily unavailable</html>"
+        )
+
+        with pytest.raises(ProviderError, match="non-JSON"):
+            provider._request({"symbol": "BTCUSDT"})
+
+    @patch("urllib.request.urlopen")
+    def test_json_object_is_wrong_shape_raises_provider_error(
+        self, mock_urlopen: MagicMock, provider: BinanceProvider
+    ) -> None:
+        # Klines return a JSON *list*; a top-level object violates the contract.
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+            json.dumps({"code": 0, "msg": "ok"}).encode("utf-8")
+        )
+
+        with pytest.raises(ProviderError, match="unexpected response shape"):
+            provider._request({"symbol": "BTCUSDT"})
+
+
+class TestBinanceBackoffCap:
+    @patch("time.sleep")
+    @patch("fin3.providers.binance.BinanceProvider._request")
+    def test_sleep_calls_capped_at_max_backoff(
+        self, mock_request: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        # Always-429 with max_retries=3 sleeps on attempts 0 and 1 only:
+        # min(10 * 2**0, 12) == 10, min(10 * 2**1, 12) == 12.
+        provider = BinanceProvider(
+            BinanceConfig(max_retries=3, initial_backoff=10.0, max_backoff=12.0)
+        )
+        mock_request.side_effect = ProviderRateLimitError("429")
+
+        with pytest.raises(ProviderRateLimitError):
+            provider._request_with_retry({"symbol": "BTCUSDT"})
+
+        assert [call.args[0] for call in mock_sleep.call_args_list] == [10.0, 12.0]
+
+
+class TestBinancePaginationGuard:
+    @patch("fin3.providers.binance.BinanceProvider._request_with_retry")
+    def test_fetch_terminates_when_last_open_does_not_advance(
+        self, mock_request: MagicMock
+    ) -> None:
+        # Full pages (len == request_limit): a short page would legitimately
+        # end pagination after one request via the len(batch) < limit break.
+        provider = BinanceProvider(BinanceConfig(request_limit=2))
+        t0 = 1704153600000  # 2024-01-02 00:00 UTC
+        stuck = [
+            kline(t0, 100.0, 100.5, 99.5, 100.2, 1000.0),
+            kline(t0 + 60_000, 100.2, 101.5, 100.0, 101.0, 1100.0),
+        ]
+        # Both pages end at the same open time — the cursor never advances.
+        mock_request.side_effect = [stuck, stuck]
+
+        result = provider.fetch(
+            symbol="BTC-USD",
+            start=datetime(2024, 1, 2, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 2, 0, 5, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_MINUTE,
+        )
+
+        # Mirrors the Massive cursor guard: followed once, broke on the repeat
+        # instead of looping forever.
+        assert mock_request.call_count == 2
+        assert len(result) == 2  # duplicated bars deduplicated

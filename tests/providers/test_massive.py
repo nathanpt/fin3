@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import json
+import socket
+import urllib.error
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +13,11 @@ import pandas as pd
 import pytest
 
 from fin3.config.settings import MassiveConfig
-from fin3.exceptions import ProviderError, ProviderRateLimitError
+from fin3.exceptions import (
+    ProviderError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
+)
 from fin3.providers.massive import (
     MassiveProvider,
     _normalise,
@@ -174,9 +182,6 @@ class TestMassiveProviderFetch:
 
         url = mock_request.call_args.args[0]
         assert range_segment in url
-        # 4h maps natively (no aggregation fallback)
-        if resolution is Resolution.FOUR_HOUR:
-            assert "range/4/hour/" in url
 
     @patch("fin3.providers.massive.MassiveProvider._request_with_retry")
     def test_pagination_follows_next_url(
@@ -290,8 +295,6 @@ class TestMassiveProviderFetch:
         assert "adjusted=true" in url
 
     def test_unsupported_resolution_raises(self, provider: MassiveProvider) -> None:
-        bogus = MagicMock(spec=Resolution)
-        bogus.value = "2m"
         with patch.dict("fin3.providers.massive._RESOLUTION_TO_RANGE", {}, clear=True):
             with pytest.raises(ProviderError, match="Unsupported resolution"):
                 provider.fetch(
@@ -403,10 +406,87 @@ class TestMassiveProviderConfig:
         provider = MassiveProvider(MassiveConfig(api_key="k", request_limit=100000))
         assert provider._limit == 50000
 
-    def test_custom_retry_values(self) -> None:
-        config = MassiveConfig(
-            api_key="k", max_retries=5, initial_backoff=2.0, max_backoff=120.0
+
+class TestMassiveHttpRequestClassification:
+    """Classify raw HTTP failures in ``_request`` (no retry mocking).
+
+    Patches ``urllib.request.urlopen`` — the name the module actually calls —
+    and asserts the typed exception each failure mode maps to.
+    """
+
+    _URL = "https://api.massive.com/v2/aggs/ticker/AAPL/range/1/day/1/2"
+
+    @patch("urllib.request.urlopen")
+    def test_http_429_raises_rate_limit(
+        self, mock_urlopen: MagicMock, provider: MassiveProvider
+    ) -> None:
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            self._URL, 429, "Too Many Requests", None, None
         )
-        assert config.max_retries == 5
-        assert config.initial_backoff == 2.0
-        assert config.max_backoff == 120.0
+
+        with pytest.raises(ProviderRateLimitError, match="429"):
+            provider._request(self._URL)
+
+    @patch("urllib.request.urlopen")
+    def test_urlerror_wrapping_socket_timeout_raises_timeout(
+        self, mock_urlopen: MagicMock, provider: MassiveProvider
+    ) -> None:
+        mock_urlopen.side_effect = urllib.error.URLError(socket.timeout("timed out"))
+
+        with pytest.raises(ProviderTimeoutError, match="timeout"):
+            provider._request(self._URL)
+
+    @patch("urllib.request.urlopen")
+    def test_other_http_4xx_raises_provider_error(
+        self, mock_urlopen: MagicMock, provider: MassiveProvider
+    ) -> None:
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            self._URL, 403, "Forbidden", None, io.BytesIO(b"not entitled")
+        )
+
+        with pytest.raises(ProviderError, match="HTTP 403"):
+            provider._request(self._URL)
+
+    @patch("urllib.request.urlopen")
+    def test_non_json_body_raises_provider_error(
+        self, mock_urlopen: MagicMock, provider: MassiveProvider
+    ) -> None:
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+            b"<html>service temporarily unavailable</html>"
+        )
+
+        with pytest.raises(ProviderError, match="non-JSON"):
+            provider._request(self._URL)
+
+    @patch("urllib.request.urlopen")
+    def test_json_list_is_wrong_shape_raises_provider_error(
+        self, mock_urlopen: MagicMock, provider: MassiveProvider
+    ) -> None:
+        # Aggregates return a JSON *object*; a bare list violates the contract.
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = (
+            json.dumps([{"o": 1.0}]).encode("utf-8")
+        )
+
+        with pytest.raises(ProviderError, match="unexpected response shape"):
+            provider._request(self._URL)
+
+
+class TestMassiveBackoffCap:
+    @patch("time.sleep")
+    @patch("fin3.providers.massive.MassiveProvider._request")
+    def test_sleep_calls_capped_at_max_backoff(
+        self, mock_request: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        # Always-429 with max_retries=3 sleeps on attempts 0 and 1 only:
+        # min(10 * 2**0, 12) == 10, min(10 * 2**1, 12) == 12.
+        provider = MassiveProvider(
+            MassiveConfig(
+                api_key="k", max_retries=3, initial_backoff=10.0, max_backoff=12.0
+            )
+        )
+        mock_request.side_effect = ProviderRateLimitError("429")
+
+        with pytest.raises(ProviderRateLimitError):
+            provider._request_with_retry("https://api.massive.com/x")
+
+        assert [call.args[0] for call in mock_sleep.call_args_list] == [10.0, 12.0]

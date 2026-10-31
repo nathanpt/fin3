@@ -9,10 +9,14 @@ Run with:
 
 from datetime import datetime, timezone
 
+import pytest
+
 from fin3.providers.databento import DatabentoProvider
 from fin3.schemas import Resolution
 
 from .conftest import RANGE_1D, RANGE_1H, RANGE_1M, SYMBOL_EQUITY
+
+pytestmark = pytest.mark.integration
 
 
 class TestDatabentoProviderSmoke:
@@ -41,7 +45,14 @@ class TestDatabentoProviderSmoke:
         assert not df.empty
         for col in ("open", "high", "low", "close", "volume"):
             assert col in df.columns
+        assert df.index.is_monotonic_increasing
         assert str(df.index.tz) == "UTC"  # type: ignore[attr-defined]
+        # OHLCV constraints (same geometry standard as the 1m sibling)
+        assert (df["low"] <= df["open"]).all()
+        assert (df["open"] <= df["high"]).all()
+        assert (df["low"] <= df["close"]).all()
+        assert (df["close"] <= df["high"]).all()
+        assert (df["volume"] >= 0).all()
 
     def test_fetch_ohlcv_1d(self, databento_provider: DatabentoProvider) -> None:
         start, end = RANGE_1D
@@ -51,6 +62,14 @@ class TestDatabentoProviderSmoke:
         for col in ("open", "high", "low", "close", "volume"):
             assert col in df.columns
         assert len(df) >= 1
+        assert df.index.is_monotonic_increasing
+        assert str(df.index.tz) == "UTC"  # type: ignore[attr-defined]
+        # OHLCV constraints (same geometry standard as the 1m sibling)
+        assert (df["low"] <= df["open"]).all()
+        assert (df["open"] <= df["high"]).all()
+        assert (df["low"] <= df["close"]).all()
+        assert (df["close"] <= df["high"]).all()
+        assert (df["volume"] >= 0).all()
 
     def test_fetch_no_data_returns_empty(self, databento_provider: DatabentoProvider) -> None:
         """Requesting a future date range should return an empty DataFrame (free)."""
