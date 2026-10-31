@@ -6,6 +6,10 @@ dist/
 wheels/
 *.egg-info
 
+# Test coverage artifacts (pytest-cov does not self-ignore)
+.coverage
+htmlcov/
+
 # MkDocs build output
 site/
 
@@ -19,6 +23,7 @@ site/
 docs/arcticdb_docs/
 
 # Local / internal tooling & process artifacts
+AGENTS.md
 .factory/
 .hermes/
 .docs/
