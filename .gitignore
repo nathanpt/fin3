@@ -22,7 +22,6 @@ docs/arcticdb_docs/
 .factory/
 .hermes/
 .docs/
-docs/handoffs/
 qa-results/
 package-lock.json
 scripts/.bulk_download.log
