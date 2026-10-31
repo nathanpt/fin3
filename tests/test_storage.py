@@ -1,5 +1,7 @@
 """Tests for ArcticStorage."""
 
+import urllib.error
+import urllib.request
 import warnings
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
@@ -9,7 +11,7 @@ import pytest
 
 from fin3.config.settings import LockConfig, MinioConfig
 from fin3.exceptions import StorageError
-from fin3.storage.arctic import ArcticStorage, _suppress_blockmanager_warning
+from fin3.storage.arctic import ArcticStorage, _S3_LIB_NAME, _suppress_blockmanager_warning
 from tests.conftest import make_ohlcv
 from tests.test_defrag import fragment_symbol_with_updates
 
@@ -334,3 +336,228 @@ class TestSymbolLocking:
             pass
         # The lock file is left in place after release (see locking.py docs).
         assert any(lock_dir.glob("*.lock"))
+
+
+class TestReadOnlyLibraryLookup:
+    """Read-path operations must never create buckets or libraries.
+
+    The manifest feature requires genuinely read-only inspection: reading an
+    absent library returns the documented absent results and leaves storage
+    untouched (previously ``read`` lazily created the library).
+    """
+
+    @pytest.mark.parametrize(
+        ("op", "expected"),
+        [
+            (lambda s: s.read("ghost-lib", "AAPL"), None),
+            (lambda s: s.list_symbols("ghost-lib"), []),
+            (lambda s: s.has_symbol("ghost-lib", "AAPL"), False),
+            (lambda s: s.get_symbol_size("ghost-lib", "AAPL"), 0),
+            (lambda s: s.get_segment_count("ghost-lib", "AAPL"), 0),
+            (lambda s: s.get_library_size("ghost-lib"), 0),
+            (lambda s: s.is_symbol_fragmented("ghost-lib", "AAPL"), False),
+            (lambda s: s.has_library("ghost-lib"), False),
+        ],
+    )
+    def test_absent_library_results_without_creation(
+        self, storage: ArcticStorage, op, expected
+    ) -> None:
+        assert op(storage) == expected
+        # No library was silently created by the inspection.
+        assert storage.arctic.list_libraries() == []
+
+    def test_read_after_ensure_and_write_roundtrip(
+        self, storage: ArcticStorage
+    ) -> None:
+        assert storage.has_library("real-lib") is False
+        storage.ensure_library("real-lib")
+        assert storage.has_library("real-lib") is True
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        storage.write("real-lib", "AAPL", df)
+        result = storage.read("real-lib", "AAPL")
+        assert result is not None
+        pd.testing.assert_frame_equal(result, df, check_exact=True, check_freq=False)
+
+
+def _http_error(code: int) -> "urllib.error.HTTPError":
+    return urllib.error.HTTPError(
+        url="http://minio:9000/bucket", code=code, msg="x", hdrs=None, fp=None
+    )
+
+
+class TestSignedBucketBoundary:
+    """MinIO probes: signed HEAD is the only inspection request; 404 is
+    absence, everything else is an error — never bucket/library creation."""
+
+    @pytest.fixture
+    def minio_storage(self) -> ArcticStorage:
+        return ArcticStorage(
+            MinioConfig(
+                endpoint="minio:9000",
+                access_key="ak",
+                secret_key="sk",
+                bucket="",
+            )
+        )
+
+    def test_absent_library_probe_records_head_only_and_creates_nothing(
+        self, minio_storage: ArcticStorage, monkeypatch
+    ) -> None:
+        calls: list[str] = []
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.get_method() + " " + req.full_url)
+            if req.get_method() == "HEAD":
+                raise _http_error(404)
+            raise AssertionError(f"unexpected request during probe: {calls}")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        assert minio_storage.has_library("some-lib") is False
+        assert calls == ["HEAD http://minio:9000/some-lib"]
+
+    def test_403_on_probe_is_error_not_absence(
+        self, minio_storage: ArcticStorage, monkeypatch
+    ) -> None:
+        def fake_urlopen(req, timeout=None):
+            raise _http_error(403)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        with pytest.raises(StorageError, match="HTTP 403"):
+            minio_storage.has_library("some-lib")
+
+    def test_transport_failure_on_probe_is_error(
+        self, minio_storage: ArcticStorage, monkeypatch
+    ) -> None:
+        def fake_urlopen(req, timeout=None):
+            raise urllib.error.URLError("connection timed out")
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        with pytest.raises(StorageError, match="timed out"):
+            minio_storage.has_library("some-lib")
+
+    def test_present_bucket_and_library_is_found(
+        self, minio_storage: ArcticStorage, monkeypatch
+    ) -> None:
+        """HEAD 2xx + listed library returns the handle without writes."""
+        requests: list[str] = []
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class FakeArctic(MagicMock):
+            def list_libraries(self):
+                return [_S3_LIB_NAME]
+
+        fake_arctic = FakeArctic()
+        monkeypatch.setattr(
+            minio_storage, "_get_arctic", lambda bucket: fake_arctic
+        )
+
+        def fake_urlopen(req, timeout=None):
+            requests.append(req.get_method())
+            return FakeResponse()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        # Per-library-bucket mode: bucket "some-lib", Arctic library "main".
+        lib = minio_storage._get_existing_library("some-lib")
+        assert lib is fake_arctic[_S3_LIB_NAME]
+        assert requests == ["HEAD"]
+        # ...and the handle is cached for subsequent reads.
+        assert minio_storage._get_existing_library("some-lib") is lib
+        assert requests == ["HEAD"]
+
+    def test_ensure_bucket_409_requires_head_confirmation(
+        self, minio_storage: ArcticStorage, monkeypatch
+    ) -> None:
+        calls: list[str] = []
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            method = req.get_method()
+            calls.append(method)
+            if method == "PUT":
+                raise _http_error(409)
+            return FakeResponse()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        minio_storage._ensure_bucket("b")
+        assert calls == ["PUT", "HEAD"]
+
+    def test_ensure_bucket_409_without_access_raises(
+        self, minio_storage: ArcticStorage, monkeypatch
+    ) -> None:
+        def fake_urlopen(req, timeout=None):
+            if req.get_method() == "PUT":
+                raise _http_error(409)
+            raise _http_error(404)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        with pytest.raises(StorageError, match="not accessible"):
+            minio_storage._ensure_bucket("b")
+
+    def test_ensure_bucket_hard_failure_raises(
+        self, minio_storage: ArcticStorage, monkeypatch
+    ) -> None:
+        def fake_urlopen(req, timeout=None):
+            raise _http_error(500)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        with pytest.raises(StorageError, match="HTTP 500"):
+            minio_storage._ensure_bucket("b")
+
+    def test_concurrent_duplicate_library_create_reopens(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A lost create_library race reopens when a re-list confirms existence."""
+        storage = ArcticStorage.from_lmdb(str(tmp_path / "lmdb"))
+        arctic = storage.arctic
+        original_create = arctic.create_library
+
+        def racing_create(name, **kwargs):
+            # The concurrent creator wins: the library appears, then our
+            # create call reports the duplicate.
+            original_create(name, **kwargs)
+            raise ValueError("Library already exists: race-lib")
+
+        monkeypatch.setattr(arctic, "create_library", racing_create)
+        storage._get_or_create_library("race-lib")
+        assert storage.has_library("race-lib") is True
+
+    def test_concurrent_duplicate_library_create_failure_propagates(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        storage = ArcticStorage.from_lmdb(str(tmp_path / "lmdb"))
+        arctic = storage.arctic
+
+        def failing_create(name, **kwargs):
+            raise ValueError("Library already exists: race2-lib")
+
+        monkeypatch.setattr(arctic, "create_library", failing_create)
+        with pytest.raises(StorageError, match="Failed to create library"):
+            storage._get_or_create_library("race2-lib")
+        assert storage.has_library("race2-lib") is False

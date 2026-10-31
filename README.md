@@ -19,6 +19,9 @@ execution or investment performance; no external adoption is claimed.
 - Raw-provider and post-alignment validation, metadata bootstrap, and per-symbol
   cross-process file locking.
 - Integrity auditing, HTML inspection reports, defragmentation, and resource monitoring.
+- Declarative YAML/JSON dataset manifests with an installed `fin3` command
+  (`ensure`, `sync`, and read-only `status`), including dry-run previews and
+  drift detection.
 - Standalone download, audit, inspection, and Databento normalization scripts.
 
 These are implemented capabilities, not a guarantee of error-free data or universal
@@ -33,10 +36,7 @@ every provider on each checkout.
 
 | Provider key | Implemented scope | Verification and limitations |
 |---|---|---|
-| `databento` | Historical OHLCV via the Databento SDK; dataset selection, normalization, retry/backoff, and cost estimates | Requires the `databento` extra, an API key, and applicable data entitlements. This documentation audit did not run a paid download. |
-| `binance` | Public spot klines, pagination, retry/backoff, listing-bound probe; `BTC-USD` maps to `BTCUSDT` | [PR #1](https://github.com/nathanpt/fin3/pull/1) records live daily/hourly/minute downloads, including pagination. Some regions block the default host; `BinanceConfig.base_url` is configurable. USDT quotes are not USD quotes. |
-| `yahoo` | Yahoo Finance OHLCV through optional `yfinance`; raw prices by default, retry/backoff, lifecycle probe | [PR #3](https://github.com/nathanpt/fin3/pull/3) records live equity and crypto downloads. Unofficial, rate-limited research source with restricted intraday history; not a sole production data source. `4h` uses hourly data and core aggregation, not native Yahoo 4h bars. |
-| `massive` | Massive/Polygon REST aggregates; US-equity-focused configuration, native 4h bars, cursor pagination, raw prices by default | [PR #4](https://github.com/nathanpt/fin3/pull/4) added the implementation; [PR #5](https://github.com/nathanpt/fin3/pull/5) records live daily/minute data, pagination, and rate-limit handling. Requires an API key; history and access depend on plan. Lifecycle bounds can reflect the plan's history boundary rather than the true listing date. |
+1: @ours
 
 `max_cost` checks provider-reported estimates before fetching. Databento queries
 its cost API; Binance and Yahoo report zero, while subscription-based Massive also
@@ -106,8 +106,10 @@ NYSE hours are not a fixed UTC interval year-round.
 
 ## Standalone tools
 
-A unified `fin3` command is not implemented. Run the existing scripts from the
-checkout with `uv run python scripts/<name>.py --help` before using them.
+The installed `fin3` command drives the declarative manifest workflow
+(`fin3 ensure`, `fin3 sync`, and read-only `fin3 status`; see docs/USAGE.md).
+The scripts below remain standalone: run them from the checkout with
+`uv run python scripts/<name>.py --help` before using them.
 Some commands download paid data or modify storage; review their options first.
 
 | Script | Purpose |
@@ -121,9 +123,7 @@ Some commands download paid data or modify storage; review their options first.
 
 ## Unfinished / planned
 
-- Declarative YAML dataset manifests and `fin3 ensure` / `fin3 sync`.
 - High-level `DataManager` retrieval, alignment, and multi-format output API.
-- A unified CLI.
 - Additional providers such as ThetaData; no ThetaData provider is in the public tree.
 
 Binance, Yahoo, and Massive are implemented, not future provider stubs. The older

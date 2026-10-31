@@ -297,6 +297,74 @@ Key behaviors:
 - **Calendar-aware**: equity/futures gaps are detected per trading day; crypto gaps per hour
 - **Validated**: two-stage validation catches structural issues (duplicates, bad OHLCV constraints, NaN where there shouldn't be)
 
+## Declarative Manifests (`fin3 ensure` / `fin3 sync` / `fin3 status`)
+
+A manifest declares *what* data must exist. The installed CLI makes stored
+reality match the declaration:
+
+```bash
+fin3 ensure MANIFEST [--dry-run] [--json] [--max-cost USD]
+fin3 sync   MANIFEST [--dry-run] [--json] [--max-cost USD]
+fin3 status MANIFEST [--json]
+```
+
+- `ensure` bootstraps missing libraries and symbols only; it never modifies
+  existing symbols (even ones with holes).
+- `sync` reconciles stored data per update policy; it never deletes stored
+  history (removing a symbol from the manifest does not delete its data).
+- `status` is a strictly read-only preview of what `sync` would do — no
+  provider calls, no locks, no library or bucket creation.
+
+### Manifest format
+
+```yaml
+version: 1
+id: research-bars
+libraries:
+  crypto-hourly:
+    asset_type: crypto          # equity_us | crypto | futures
+    provider: binance
+    resolution: 1h
+    calendar: 24x7              # optional; derived from asset type
+    symbols:
+      include: [BTC-USD, ETH-USD, '@symbols/watchlist-*.txt']
+      exclude: [DOGE-USD]
+    start: '2024-01-01T00:00:00Z'
+    end: now                    # fixed RFC3339 / YYYY-MM-DD / now
+    update_policy: incremental  # incremental | full-refresh | append-only
+```
+
+- Symbols are literal tickers (case preserved: `BRK B`, `ES.n.0`) or `@`
+  references to UTF-8 symbol-list files (one per line, comma-separated, `#`
+  comments). References may use nonrecursive file globs (`*`, `?`, `[]`) and
+  resolve relative to the manifest's directory.
+- Physical libraries follow the canonical naming scheme
+  (`library_name()`): the logical key `crypto-hourly` stores into
+  `crypto-1h-binance`. Two datasets may not claim the same
+  (library, symbol) pair.
+- `sync` policies: `incremental` fills exactly the missing expected bars
+  (start-stamped, finished bars only); `append-only` fills only bars newer
+  than the symbol's newest stored row; `full-refresh` refetches the requested
+  window while preserving everything outside it.
+- Provider names must be configured (`FIN3_PROVIDERS__*`) and registered;
+  credentials live only in the environment, never in the manifest.
+
+### Drift state and exit codes
+
+After a fully successful `sync`, the run records a single-row state record
+(`fin3-metadata/__manifest__{id}`) with the declaration hash and timestamp.
+`fin3 status` reports `definition_state` (`untracked` / `unchanged` /
+`changed`) by comparing that hash with the current declaration; formatting
+edits, comments, key order, and the passing of time under `end: now` do not
+change the hash, but adding/removing a resolved symbol or changing bounds or
+policy does.
+
+Exit codes: `0` success (a valid `status` showing drift is not an error),
+`1` operational/per-symbol/state-write/cost-ceiling failure, `2` invalid
+arguments, manifest, or configuration. `--json` emits exactly one JSON value
+on stdout; diagnostics go to stderr. Provider errors are redacted against
+configured secrets before rendering.
+
 ## Storage Maintenance
 
 ### Defragmenting ArcticDB Symbols

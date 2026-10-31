@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import hmac
+import urllib.error
+import urllib.request
 import warnings
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, ContextManager, Iterator, cast
 
 import arcticdb as adb
@@ -164,23 +168,19 @@ class ArcticStorage:
         """Return the Arctic instance for a given bucket."""
         return self._get_arctic(bucket)
 
-    def _ensure_bucket(self, bucket: str) -> None:
-        """Create the S3 bucket if it doesn't already exist (MinIO/S3).
+    def _bucket_request(self, bucket: str, method: str) -> None:
+        """Issue an empty-payload SigV4-signed bucket-level request.
 
-        Uses SigV4-signed PUT to create the bucket. Silently succeeds
-        if the bucket already exists.
+        Returns on a 2xx response. :class:`urllib.error.HTTPError` propagates
+        so callers can branch on the status code (e.g. 404 = absent bucket);
+        transport failures raise :class:`StorageError` with the original cause
+        preserved.
         """
-        import hashlib
-        import hmac
-        import urllib.request
-        import urllib.error
-        from datetime import datetime as _dt, timezone
-
         scheme = "https" if self._config.secure else "http"
         url = f"{scheme}://{self._config.endpoint}/{bucket}"
 
-        now = _dt.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        date_stamp = _dt.now(timezone.utc).strftime("%Y%m%d")
+        now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        date_stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
         region = "us-east-1"
         service = "s3"
         host = self._config.endpoint
@@ -195,7 +195,7 @@ class ArcticStorage:
         canonical_headers = "".join(f"{k}:{v}\n" for k, v in sorted(headers.items()))
         signed_headers = ";".join(sorted(headers.keys()))
         canonical_request = (
-            f"PUT\n/{bucket}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+            f"{method}\n/{bucket}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
         )
 
         scope = f"{date_stamp}/{region}/{service}/aws4_request"
@@ -219,48 +219,140 @@ class ArcticStorage:
         )
         headers["Authorization"] = auth
 
-        req = urllib.request.Request(url, method="PUT", data=b"", headers=headers)
+        req = urllib.request.Request(url, method=method, data=b"", headers=headers)
         try:
-            urllib.request.urlopen(req, timeout=10)
-            logger.info("storage.bucket_created", bucket=bucket)
-        except urllib.error.HTTPError as e:
-            # 409 = BucketAlreadyOwnedByYou, 200 = success — anything else is unexpected
-            if e.code not in (200, 409):
-                body = e.read().decode()
-                logger.warning(
-                    "storage.bucket_create_failed",
-                    bucket=bucket,
-                    code=e.code,
-                    body=body[:200],
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.status
+            if not 200 <= status < 300:
+                raise StorageError(
+                    f"Unexpected HTTP {status} for {method} bucket {bucket} "
+                    f"at {self._config.endpoint}"
                 )
+        except urllib.error.HTTPError:
+            raise
+        except StorageError:
+            raise
         except Exception as exc:
-            logger.warning("storage.bucket_create_failed", bucket=bucket, error=str(exc))
+            raise StorageError(
+                f"{method} request for bucket {bucket} at "
+                f"{self._config.endpoint} failed: {exc}"
+            ) from exc
+
+    def _bucket_exists(self, bucket: str) -> bool:
+        """Read-only bucket existence probe via signed HEAD.
+
+        404 means absent. 403 (no permission), transport failures, and any
+        other unexpected response raise :class:`StorageError` — lack of
+        permission or connectivity is never treated as an empty/absent
+        bucket.
+        """
+        try:
+            self._bucket_request(bucket, "HEAD")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            raise StorageError(
+                f"Bucket existence probe for {bucket} at "
+                f"{self._config.endpoint} failed: HTTP {exc.code}"
+            ) from exc
+        return True
+
+    def _ensure_bucket(self, bucket: str) -> None:
+        """Create the S3 bucket if it doesn't already exist (MinIO/S3).
+
+        Uses SigV4-signed PUT. Raises :class:`StorageError` on creation
+        errors; 409 (BucketAlreadyOwnedByYou) is accepted only when a
+        subsequent HEAD confirms the bucket exists and is accessible.
+        """
+        try:
+            self._bucket_request(bucket, "PUT")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409:
+                if self._bucket_exists(bucket):
+                    logger.info("storage.bucket_exists", bucket=bucket)
+                    return
+                raise StorageError(
+                    f"Bucket creation returned 409 but {bucket} is not "
+                    f"accessible at {self._config.endpoint}"
+                ) from exc
+            body = ""
+            with contextlib.suppress(Exception):
+                body = exc.read().decode()[:200]
+            raise StorageError(
+                f"Failed to create bucket {bucket} at {self._config.endpoint}: "
+                f"HTTP {exc.code} {body}"
+            ) from exc
+        logger.info("storage.bucket_created", bucket=bucket)
+
+    def _library_location(self, name: str) -> tuple[str, str]:
+        """Map a logical library name to its ``(bucket, arctic library name)``.
+
+        LMDB uses the shared ``__lmdb__`` Arctic instance with the supplied
+        name; single-bucket MinIO uses ``config.bucket`` with the supplied
+        name; per-library-bucket mode uses the supplied name as bucket with
+        Arctic library ``main``.
+        """
+        if self._is_lmdb:
+            return ("__lmdb__", name)
+        if self._single_bucket:
+            return (self._single_bucket, name)
+        return (name, _S3_LIB_NAME)
+
+    def _get_existing_library(self, name: str) -> adb.Library | None:
+        """Return the library handle if it exists, else None. Strictly read-only.
+
+        Uses only a signed HEAD bucket probe plus ``Arctic.list_libraries()``
+        — never ``_ensure_bucket``, ``create_library``, or any write method.
+        May fill the in-memory handle cache; absence is not cached.
+        """
+        cached = self._library_cache.get(name)
+        if cached is not None:
+            return cached
+
+        bucket, lib_name = self._library_location(name)
+        if not self._is_lmdb and not self._bucket_exists(bucket):
+            return None
+
+        arctic = self._get_arctic(bucket)
+        if lib_name not in arctic.list_libraries():
+            return None
+        lib = arctic[lib_name]
+        self._library_cache[name] = lib
+        return lib
+
+    def has_library(self, name: str) -> bool:
+        """Return True when the library already exists (read-only check)."""
+        return self._get_existing_library(name) is not None
+
+    def ensure_library(self, name: str) -> None:
+        """Explicitly create the library if missing (the one mutating path)."""
+        self._get_or_create_library(name)
 
     def _get_or_create_library(self, name: str) -> adb.Library:
-        if name in self._library_cache:
-            return self._library_cache[name]
+        cached = self._library_cache.get(name)
+        if cached is not None:
+            return cached
 
-        # Determine which bucket and library name to use
-        if self._is_lmdb:
-            # LMDB: single Arctic, library name = name
-            bucket = "__lmdb__"
-            lib_name = name
-        elif self._single_bucket:
-            # Single-bucket mode: one bucket, library name = name
-            bucket = self._single_bucket
-            lib_name = name
-            self._ensure_bucket(bucket)
-        else:
-            # Per-library bucket mode: bucket = name, library name = "main"
-            bucket = name
-            lib_name = _S3_LIB_NAME
+        bucket, lib_name = self._library_location(name)
+        if not self._is_lmdb:
             self._ensure_bucket(bucket)
 
         arctic = self._get_arctic(bucket)
         if lib_name not in arctic.list_libraries():
-            arctic.create_library(
-                lib_name, library_options=adb.LibraryOptions(dynamic_schema=True)
-            )
+            try:
+                arctic.create_library(
+                    lib_name, library_options=adb.LibraryOptions(dynamic_schema=True)
+                )
+            except Exception as exc:
+                # Concurrent duplicate create_library (two manifest runs
+                # racing on the same canonical library): reopen only when a
+                # re-list confirms the library now exists; otherwise the
+                # failure is real and must propagate.
+                if lib_name not in arctic.list_libraries():
+                    raise StorageError(
+                        f"Failed to create library {name}"
+                    ) from exc
+                logger.info("storage.library_created_concurrently", library=name)
         lib = arctic[lib_name]
         self._library_cache[name] = lib
         return lib
@@ -280,7 +372,9 @@ class ArcticStorage:
             If provided, only read the specified columns from storage.
             The index is always returned regardless.
         """
-        lib = self._get_or_create_library(library)
+        lib = self._get_existing_library(library)
+        if lib is None:
+            return None
         try:
             kwargs: dict[str, Any] = {}
             if date_range is not None:
@@ -352,7 +446,9 @@ class ArcticStorage:
         list[str]
             Sorted list of symbol names.
         """
-        lib = self._get_or_create_library(library)
+        lib = self._get_existing_library(library)
+        if lib is None:
+            return []
         return lib.list_symbols()  # type: ignore[no-any-return]
 
     def has_symbol(self, library: str, symbol: str) -> bool:
@@ -370,7 +466,9 @@ class ArcticStorage:
         bool
             True if the symbol has stored data in the library.
         """
-        lib = self._get_or_create_library(library)
+        lib = self._get_existing_library(library)
+        if lib is None:
+            return False
         try:
             with _suppress_blockmanager_warning():
                 lib.read(symbol)
@@ -383,7 +481,9 @@ class ArcticStorage:
 
         Returns 0 if the symbol does not exist.
         """
-        lib = self._get_or_create_library(library)
+        lib = self._get_existing_library(library)
+        if lib is None:
+            return 0
         try:
             sizes = lib.admin_tools().get_sizes_for_symbol(symbol)
             total = sum_sizes(sizes.values())
@@ -396,7 +496,9 @@ class ArcticStorage:
 
         Returns 0 if the symbol does not exist or segment metadata is unavailable.
         """
-        lib = self._get_or_create_library(library)
+        lib = self._get_existing_library(library)
+        if lib is None:
+            return 0
         try:
             sizes = lib.admin_tools().get_sizes_for_symbol(symbol)
             table_data = sizes.get(adb.KeyType.TABLE_DATA)
@@ -416,7 +518,9 @@ class ArcticStorage:
 
         Returns 0 if the library is empty or metadata is unavailable.
         """
-        lib = self._get_or_create_library(library)
+        lib = self._get_existing_library(library)
+        if lib is None:
+            return 0
         try:
             sizes = lib.admin_tools().get_sizes()
             total = sum_sizes(sizes.values())
@@ -429,7 +533,9 @@ class ArcticStorage:
 
         Returns False if the symbol does not exist or fragmentation metadata is unavailable.
         """
-        lib = self._get_or_create_library(library)
+        lib = self._get_existing_library(library)
+        if lib is None:
+            return False
         try:
             return bool(lib.is_symbol_fragmented(symbol))
         except Exception:

@@ -20,32 +20,9 @@ from fin3.config.settings import ClientConfig
 from fin3.core import MarketDataFetcher
 from fin3.schemas import AssetType, Resolution
 from fin3.storage.arctic import ArcticStorage
+from fin3.utils.symbols import parse_symbols
 
 import fin3.providers.databento  # noqa: F401  # register provider
-
-
-def parse_symbols(text: str) -> list[str]:
-    """Parse symbols from newline- and/or comma-separated text.
-
-    Blank lines and ``#`` comments are ignored. Whitespace is trimmed.
-    """
-    symbols: list[str] = []
-    for line in text.splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        for tok in line.split(","):
-            tok = tok.strip()
-            if tok:
-                symbols.append(tok.upper())
-    # Preserve order, drop duplicates
-    seen: set[str] = set()
-    out: list[str] = []
-    for s in symbols:
-        if s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out
 
 
 def main() -> None:
@@ -82,11 +59,11 @@ def main() -> None:
         except OSError as exc:
             print(f"Error reading --symbols-file {args.symbols_file!r}: {exc}", file=sys.stderr)
             sys.exit(2)
-        symbols = parse_symbols(file_text)
+        symbols = parse_symbols(file_text.upper())
         if not symbols:
             parser.error(f"No symbols found in {args.symbols_file!r}.")
     else:
-        symbols = parse_symbols(args.symbols)
+        symbols = parse_symbols(args.symbols.upper())
 
     resolution = Resolution(args.resolution)
     start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)

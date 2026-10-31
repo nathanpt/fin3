@@ -335,13 +335,6 @@ class MarketDataFetcher:
             asset_type=asset_type,
         )
 
-        # Aggregate if provider returns finer-grained bars than requested
-        # (e.g. 1m bars for a 5m/15m resolution, or 1h bars for 4h).
-        if not raw_df.empty and len(raw_df) > 1:
-            raw_df = _aggregate_bars(raw_df, resolution)
-
-        validate_raw_provider_data(raw_df, resolution)
-
         is_new = not self._storage.has_symbol(lib_name, symbol)
 
         if raw_df.empty and is_new:
@@ -359,18 +352,7 @@ class MarketDataFetcher:
             resolution,
         )
 
-        # Providers may return bars at timestamps that don't align with the
-        # calendar grid (e.g. daily bars at midnight UTC vs market-open,
-        # or hourly bars at whole-hour UTC vs market-open offsets).
-        # Snap the raw data to the grid's timestamps so reindexing aligns.
-        if not raw_df.empty and len(grid) > 0:
-            raw_df = _snap_to_grid(raw_df, grid, resolution)
-
-        reindexed = _reindex(raw_df, grid)
-
-        validate_storage_artifact(reindexed, resolution)
-
-        _assert_boundary(reindexed, grid)
+        reindexed = _prepare_ohlcv(raw_df, grid, resolution)
 
         metadata = _write_metadata(symbol, provider, gap_start, gap_end)
 
@@ -393,6 +375,40 @@ class MarketDataFetcher:
             rows=len(reindexed),
             operation="write" if is_new else "update",
         )
+
+
+def _prepare_ohlcv(
+    raw_df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resolution
+) -> pd.DataFrame:
+    """Prepare raw provider data for storage against *grid*.
+
+    Shared by ``_fill_gap`` and the manifest runner. Retains the exact
+    ``_fill_gap`` pipeline order: finer-resolution aggregation (skipped for a
+    single raw bar, which has no meaningful median spacing), Stage-1 raw
+    validation, timestamp snapping to the grid, reindex padding, Stage-2
+    artifact validation, and the boundary check.
+    """
+    # Aggregate if provider returns finer-grained bars than requested
+    # (e.g. 1m bars for a 5m/15m resolution, or 1h bars for 4h).
+    if not raw_df.empty and len(raw_df) > 1:
+        raw_df = _aggregate_bars(raw_df, resolution)
+
+    validate_raw_provider_data(raw_df, resolution)
+
+    # Providers may return bars at timestamps that don't align with the
+    # calendar grid (e.g. daily bars at midnight UTC vs market-open,
+    # or hourly bars at whole-hour UTC vs market-open offsets).
+    # Snap the raw data to the grid's timestamps so reindexing aligns.
+    if not raw_df.empty and len(grid) > 0:
+        raw_df = _snap_to_grid(raw_df, grid, resolution)
+
+    reindexed = _reindex(raw_df, grid)
+
+    validate_storage_artifact(reindexed, resolution)
+
+    _assert_boundary(reindexed, grid)
+
+    return reindexed
 
 
 def _validate_inputs(
