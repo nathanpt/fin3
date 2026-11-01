@@ -231,7 +231,7 @@ class TestCheckIntegrityOhlcvConstraints:
 
 
 class TestCheckIntegrityNegativePrices:
-    def test_negative_price_warning(self) -> None:
+    def test_negative_price_error(self) -> None:
         df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
         df.iloc[4, df.columns.get_loc("low")] = -1.0
         grid = _grid("2024-01-02 09:30", 5)
@@ -239,7 +239,7 @@ class TestCheckIntegrityNegativePrices:
         cats = [i.category for i in report.issues]
         assert "negative_price" in cats
         issue = next(i for i in report.issues if i.category == "negative_price")
-        assert issue.severity == "warning"
+        assert issue.severity == "error"
         # Points at the first bar with a negative price (the injected row).
         assert issue.timestamp == pd.Timestamp("2024-01-02 09:34", tz="UTC")
         assert report.summary == {"negative_price": 1}
@@ -259,7 +259,7 @@ class TestCheckIntegritySummary:
         assert neg_vol.severity == "error"
         assert neg_vol.timestamp == pd.Timestamp("2024-01-02 09:31", tz="UTC")
         neg_price = next(i for i in report.issues if i.category == "negative_price")
-        assert neg_price.severity == "warning"
+        assert neg_price.severity == "error"
         assert neg_price.timestamp == pd.Timestamp("2024-01-02 09:33", tz="UTC")
 
     def test_single_row_df_passes_monotonic_and_resolution(self) -> None:

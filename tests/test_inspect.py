@@ -12,6 +12,7 @@ from fin3.calendar.exchange import ContinuousCalendarStrategy
 from fin3.inspect import SymbolProfile, _profile_symbol, inspect_library
 from fin3.schemas import Resolution
 from fin3.storage.arctic import ArcticStorage
+from fin3.utils.integrity import check_integrity
 from tests.conftest import make_empty_ohlcv, make_ohlcv
 
 
@@ -330,3 +331,54 @@ class TestInspectSizeBytes:
         result = inspect_library(storage, "test-lib", Resolution.ONE_MINUTE)
         symbols = {s.symbol: s for s in result.symbols}
         assert symbols["LARGE"].size_bytes > symbols["SMALL"].size_bytes
+
+
+class TestInspectStoredQualityIssues:
+    """Historical corruption and advisory outliers visible through inspection."""
+
+    def test_negative_price_error_and_statistical_warning_reported(
+        self, storage: ArcticStorage
+    ) -> None:
+        bad = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        bad.iloc[0, bad.columns.get_loc("low")] = -1.0
+        _write_sym(storage, "test-lib", "BAD", bad)
+
+        returns = np.random.default_rng(0).normal(0.0, 0.001, 239)
+        closes = 100.0 * np.exp(np.concatenate([[0.0], np.cumsum(returns)]))
+        closes[120] *= 10.0
+        spike_index = pd.date_range("2024-01-01", periods=len(closes), freq="1min", tz="UTC")
+        spike = pd.DataFrame(
+            {
+                "open": closes,
+                "high": closes + 0.5,
+                "low": closes - 0.5,
+                "close": closes,
+                "volume": 10.0,
+            },
+            index=spike_index,
+        )
+        _write_sym(storage, "test-lib", "SPIKE", spike)
+
+        result = inspect_library(
+            storage,
+            "test-lib",
+            Resolution.ONE_MINUTE,
+            include_integrity=True,
+            calendar_strategy=ContinuousCalendarStrategy(),
+        )
+        profiles = {s.symbol: s for s in result.symbols}
+        assert profiles["BAD"].issues_summary == {"negative_price": 1}
+        assert profiles["BAD"].issue_count == 1
+        assert profiles["SPIKE"].issues_summary == {"statistical_outlier": 1}
+        assert profiles["SPIKE"].issue_count == 1
+
+        # Direct audit supplies the severities behind those counts.
+        bad_audit = check_integrity(bad, bad.index, Resolution.ONE_MINUTE)
+        bad_issue = next(i for i in bad_audit.issues if i.category == "negative_price")
+        assert bad_issue.severity == "error"
+        assert bad_issue.timestamp == bad.index[0]
+
+        spike_audit = check_integrity(spike, spike_index, Resolution.ONE_MINUTE)
+        spike_issue = next(i for i in spike_audit.issues if i.category == "statistical_outlier")
+        assert spike_issue.severity == "warning"
+        assert spike_issue.timestamp == spike_index[120]

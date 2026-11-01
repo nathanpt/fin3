@@ -30,7 +30,14 @@ class StorageError(Fin3Error):
 
 
 class DataValidationError(Fin3Error):
-    """Data failed validation rules."""
+    """Data failed validation rules.
+
+    ``rule`` carries the registry name of the failing rule when the error
+    was raised by a rule-driven validator; policy guards that raise this
+    class directly leave it ``None``.
+    """
+
+    rule: str | None = None
 
 
 class SchemaValidationError(DataValidationError):

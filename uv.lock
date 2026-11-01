@@ -657,6 +657,7 @@ source = { editable = "." }
 dependencies = [
     { name = "arcticdb" },
     { name = "exchange-calendars" },
+    { name = "numpy" },
     { name = "pandas" },
     { name = "psutil" },
     { name = "pydantic-settings" },
@@ -697,6 +698,7 @@ requires-dist = [
     { name = "databento", marker = "extra == 'databento'" },
     { name = "exchange-calendars", specifier = ">=4.13.2" },
     { name = "mypy", marker = "extra == 'dev'" },
+    { name = "numpy", specifier = ">=1.24" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pydantic-settings", specifier = ">=2.0" },

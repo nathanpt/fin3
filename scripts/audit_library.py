@@ -19,6 +19,7 @@ from fin3.config.settings import ClientConfig
 from fin3.inspect import inspect_library
 from fin3.schemas import AssetType, Resolution
 from fin3.storage.arctic import ArcticStorage
+from fin3.utils.rules import RULE_BY_NAME
 
 
 def _fmt_size(size_bytes: int) -> str:
@@ -49,64 +50,24 @@ def _health_class(null_bars: int, total_bars: int) -> str:
 
 
 def _issue_detail(category: str, count: int, affected_symbols: list[str]) -> tuple[str, str, str]:
-    """Return (severity, description, affected_text) for an issue category."""
-    if category == "resolution_mismatch":
+    """Return (severity, description, affected_text) for an issue category.
+
+    Severity and description come from the shared rule registry so the
+    dashboard can never drift from validator/audit policy. ``issues_summary``
+    counts findings, and each category's findings are grouped per symbol, so
+    the affected text reports findings across symbols.
+    """
+    rule = RULE_BY_NAME.get(category)
+    if rule is None:
         return (
             "warning",
-            "False positive: inter-session gaps (overnight/weekend) flagged as spacing "
-            "violations. Within-session spacing is exactly 1 minute for all symbols.",
-            f"{count} / {len(affected_symbols)} symbols",
-        )
-    if category == "ohlcv_violation":
-        symbols = ", ".join(affected_symbols)
-        return (
-            "error",
-            "OHLC relationships broken (open>high, close>high, open<low). "
-            "Likely bad source data — individual bars have inconsistent price construction.",
-            f"{count} bars in {symbols}",
-        )
-    if category == "missing_bar":
-        return (
-            "error",
-            "Bars present in the expected calendar grid but missing from stored data.",
-            f"{count} bar(s) missing",
-        )
-    if category == "extra_bar":
-        return (
-            "warning",
-            "Bars in stored data that are not part of the expected calendar grid.",
-            f"{count} extra bar(s)",
-        )
-    if category == "duplicate":
-        return ("error", "Duplicate timestamps in the data.", f"{count} duplicate(s)")
-    if category == "non_monotonic":
-        return (
-            "error",
-            "Timestamps are not monotonically increasing.",
+            "Unknown issue category.",
             f"{count} occurrence(s)",
         )
-    if category == "nan_volume":
-        return ("error", "Bars with NaN volume.", f"{count} bar(s)")
-    if category == "negative_volume":
-        return ("error", "Bars with negative volume.", f"{count} bar(s)")
-    if category == "nan_semantics":
-        return (
-            "error",
-            "Inconsistent NaN semantics: volume>0 with NaN OHLC, or volume=0 with non-NaN OHLC.",
-            f"{count} bar(s)",
-        )
-    if category == "negative_price":
-        return (
-            "warning",
-            "Bars with negative price values.",
-            f"{count} bar(s)",
-        )
-    if category == "missing_column":
-        return ("error", "Expected column is missing entirely.", f"{count} occurrence(s)")
     return (
-        "warning",
-        "Unknown issue category.",
-        f"{count} occurrence(s)",
+        rule.severity,
+        rule.description,
+        f"{count} finding(s) across {len(affected_symbols)} symbol(s)",
     )
 
 

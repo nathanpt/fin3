@@ -354,20 +354,22 @@ class TestIncrementalFill:
         invalid = make_ohlcv("2024-01-01 05:30", periods=1, freq="1min")
         storage.write(LIB, "BTC-USD", pd.concat([torn, invalid]).sort_index())
 
+        before = storage.read(LIB, "BTC-USD")
+        inventory_before = inventory(storage)
+
         report = runner.sync(manifest)
         result = report.results[0]
         assert result.status == "failed"
         assert result.reason == "fetch_or_validation_failed"
-        assert (
-            isinstance(result.error, str) and "stage2" in result.error.lower() or True
-        )
-        assert any("05:00" in e or "05:30" in e for e in report.errors)
 
-        # The failing span remains unchanged: hole still open, invalid row kept.
+        # The rejected span left storage byte-identical: hole still open,
+        # off-grid row kept, no new versions, no state writes.
         after = storage.read(LIB, "BTC-USD")
         assert pd.Timestamp("2024-01-01 05:00", tz="UTC") not in after.index
         assert pd.Timestamp("2024-01-01 06:00", tz="UTC") not in after.index
         assert pd.Timestamp("2024-01-01 05:30", tz="UTC") in after.index
+        pd.testing.assert_frame_equal(after, before, check_freq=False)
+        assert inventory(storage) == inventory_before
 
 
 # ---------------------------------------------------------------------------

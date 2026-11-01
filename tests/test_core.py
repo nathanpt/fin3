@@ -8,7 +8,11 @@ import pytest
 
 from fin3.config.settings import ClientConfig, DatabentoConfig, LockConfig, MinioConfig
 from fin3.core import MarketDataFetcher
-from fin3.exceptions import ConfigurationError, CostLimitExceededError
+from fin3.exceptions import (
+    ConfigurationError,
+    CostLimitExceededError,
+    DataValidationError,
+)
 from fin3.metadata.asset_profile import MetadataStore
 from fin3.monitoring.tracker import ResourceTracker
 from fin3.providers import ProviderRegistry
@@ -796,3 +800,45 @@ class TestGetDataSemantics:
         assert result.loc[
             pd.Timestamp("2024-01-01 23:00", tz="UTC"), ("ETH-USD", "close")
         ] == pytest.approx(101.7)
+
+
+class TestValueLevelRejection:
+    """A rule-invalid update must fail loudly and leave stored data intact."""
+
+    def test_corrupt_update_rejected_and_storage_untouched(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        fetcher = _make_fetcher(lmdb_storage)
+        lib = library_name(AssetType.CRYPTO, Resolution.ONE_HOUR, "databento")
+        good = make_ohlcv("2024-01-01 00:00", periods=24, freq="1h")
+        mock_provider = _mock_provider()
+        # discovery fetch + day-1 gap fill
+        mock_provider.fetch.side_effect = [good, good]
+        fetcher._providers._providers = {"databento": mock_provider}
+
+        TestGetDataSemantics._get(
+            fetcher,
+            datetime(2024, 1, 1, tzinfo=timezone.utc),
+            datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+        )
+        stored_before = lmdb_storage.read(lib, "BTC-USD")
+        versions_before = lmdb_storage.arctic[lib].list_versions("BTC-USD")
+        assert stored_before is not None and len(stored_before) == 24
+
+        corrupt_update = make_ohlcv("2024-01-02 00:00", periods=24, freq="1h")
+        corrupt_update.iloc[0, corrupt_update.columns.get_loc("low")] = -1.0
+        # Only the day-2 gap fill is fetched on the extended window.
+        mock_provider.fetch.side_effect = [corrupt_update]
+        with pytest.raises(DataValidationError) as excinfo:
+            TestGetDataSemantics._get(
+                fetcher,
+                datetime(2024, 1, 1, tzinfo=timezone.utc),
+                datetime(2024, 1, 2, 23, 0, tzinfo=timezone.utc),
+            )
+        assert type(excinfo.value) is DataValidationError
+        assert excinfo.value.rule == "negative_price"
+
+        stored_after = lmdb_storage.read(lib, "BTC-USD")
+        assert stored_after is not None
+        pd.testing.assert_frame_equal(stored_after, stored_before)
+        assert lmdb_storage.arctic[lib].list_versions("BTC-USD") == versions_before
