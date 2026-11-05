@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fin3.config.settings import ClientConfig
 from fin3.inspect import inspect_library
-from fin3.schemas import Resolution
+from fin3.schemas import AssetType, Resolution
 from fin3.storage.arctic import ArcticStorage
 
 
@@ -254,6 +254,12 @@ def main() -> None:
         "--output", required=True,
         help="Output directory for the HTML file",
     )
+    parser.add_argument(
+        "--asset-type", default="equity_us",
+        choices=[a.value for a in AssetType],
+        help="Asset type selecting observation semantics: index libraries "
+        "count null bars by missing close (default: equity_us)",
+    )
     args = parser.parse_args()
 
     resolution = Resolution(args.resolution)
@@ -261,7 +267,9 @@ def main() -> None:
     storage = ArcticStorage(config.minio)
 
     print(f"Inspecting {args.library} ({resolution.value})...")
-    result = inspect_library(storage, args.library, resolution)
+    result = inspect_library(
+        storage, args.library, resolution, asset_type=AssetType(args.asset_type)
+    )
 
     html = generate_html(result, args.library, resolution.value)
 

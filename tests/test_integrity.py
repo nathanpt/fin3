@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 
-from fin3.schemas import Resolution
+from fin3.schemas import AssetType, Resolution
 from fin3.utils.integrity import check_integrity
 from tests.conftest import make_ohlcv, make_empty_ohlcv
 
@@ -268,3 +268,57 @@ class TestCheckIntegritySummary:
         report = check_integrity(df, grid, Resolution.ONE_MINUTE)
         # Single row: monotonic and resolution checks are trivially satisfied
         assert report.is_clean
+
+
+class TestCheckIntegrityIndexContext:
+    """INDEX_US audit: populated zero-volume rows are observations, padding
+    stays null, and the same structural rules remain active."""
+
+    @staticmethod
+    def _rows() -> pd.DataFrame:
+        index = pd.DatetimeIndex(["2024-01-02T14:30:00Z", "2024-01-03T14:30:00Z"])
+        return pd.DataFrame(
+            {
+                "open": [20.0, 21.0],
+                "high": [20.0, 21.0],
+                "low": [20.0, 21.0],
+                "close": [20.0, 21.0],
+                "volume": [0.0, 0.0],
+            },
+            index=index,
+        )
+
+    def test_populated_zero_volume_rows_clean_with_index_context(self) -> None:
+        df = self._rows()
+        grid = pd.DatetimeIndex(df.index)
+        report = check_integrity(df, grid, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+        assert report.is_clean
+        assert report.summary == {}
+
+    def test_populated_zero_volume_rows_flag_nan_semantics_without_context(self) -> None:
+        df = self._rows()
+        grid = pd.DatetimeIndex(df.index)
+        report = check_integrity(df, grid, Resolution.ONE_DAY)
+        assert report.summary == {"nan_semantics": 1}
+
+    def test_partial_index_row_reports_nan_semantics(self) -> None:
+        df = self._rows()
+        df.iloc[1, df.columns.get_loc("close")] = np.nan
+        report = check_integrity(
+            df, pd.DatetimeIndex(df.index), Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+        )
+        assert report.summary == {"nan_semantics": 1}
+        issue = next(i for i in report.issues if i.category == "nan_semantics")
+        assert issue.timestamp == df.index[1]
+
+    def test_padded_row_clean_and_missing_session_reported(self) -> None:
+        df = self._rows()
+        df.loc[pd.Timestamp("2024-01-04T14:30:00Z")] = [np.nan] * 4 + [0.0]
+        df = df.sort_index()
+        grid = pd.DatetimeIndex(df.index)
+        report = check_integrity(df, grid, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+        assert report.is_clean
+        # A grid session absent from the stored frame is still a missing bar.
+        wider = grid.append(pd.DatetimeIndex([pd.Timestamp("2024-01-05T14:30:00Z")]))
+        report2 = check_integrity(df, wider, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+        assert report2.summary == {"missing_bar": 1}

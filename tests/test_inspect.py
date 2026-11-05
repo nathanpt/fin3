@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -10,7 +12,7 @@ import pytest
 
 from fin3.calendar.exchange import ContinuousCalendarStrategy
 from fin3.inspect import SymbolProfile, _profile_symbol, inspect_library
-from fin3.schemas import Resolution
+from fin3.schemas import AssetType, Resolution
 from fin3.storage.arctic import ArcticStorage
 from fin3.utils.integrity import check_integrity
 from tests.conftest import make_empty_ohlcv, make_ohlcv
@@ -382,3 +384,241 @@ class TestInspectStoredQualityIssues:
         spike_issue = next(i for i in spike_audit.issues if i.category == "statistical_outlier")
         assert spike_issue.severity == "warning"
         assert spike_issue.timestamp == spike_index[120]
+
+
+# ---------------------------------------------------------------------------
+# INDEX_US inspection: null bars are missing closes, not zero-volume rows
+# ---------------------------------------------------------------------------
+
+
+def _index_frame_with_one_missing_session() -> pd.DataFrame:
+    """Four stored index sessions, one deliberately missing (all-NaN row)."""
+    stamps = pd.DatetimeIndex(
+        [
+            "2024-01-02T14:30:00Z",
+            "2024-01-03T14:30:00Z",
+            "2024-01-04T14:30:00Z",
+            "2024-01-05T14:30:00Z",
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "open": [14.91, 14.89, np.nan, 14.81],
+            "high": [14.91, 14.89, np.nan, 14.81],
+            "low": [14.91, 14.89, np.nan, 14.81],
+            "close": [14.91, 14.89, np.nan, 14.81],
+            "volume": [0.0, 0.0, 0.0, 0.0],
+        },
+        index=stamps,
+    )
+    frame.index.name = None
+    return frame
+
+
+INDEX_LIBRARY = "indices-1d-cboe"
+
+
+class TestIndexInspection:
+    def test_index_null_bars_counted_by_close_not_volume(
+        self, storage: ArcticStorage
+    ) -> None:
+        """One deliberately missing session counts as exactly one null — the
+        entire zero-volume index series must not be classified as null."""
+        storage.ensure_library(INDEX_LIBRARY)
+        storage.write(INDEX_LIBRARY, "VIX", _index_frame_with_one_missing_session())
+
+        overview = inspect_library(
+            storage, INDEX_LIBRARY, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+        )
+        profile = overview.symbols[0]
+        assert profile.symbol == "VIX"
+        assert profile.total_bars == 4
+        assert profile.null_bars == 1
+        assert profile.total_volume == 0.0
+
+        # Without the context, volume-only counting calls every row null.
+        default_overview = inspect_library(storage, INDEX_LIBRARY, Resolution.ONE_DAY)
+        assert default_overview.symbols[0].null_bars == 4
+
+    def test_index_integrity_clean_with_context(self, storage: ArcticStorage) -> None:
+        """With the INDEX_US context the padded session is legitimate and the
+        stored frame audits clean."""
+        storage.ensure_library(INDEX_LIBRARY)
+        storage.write(INDEX_LIBRARY, "VIX", _index_frame_with_one_missing_session())
+        overview = inspect_library(
+            storage,
+            INDEX_LIBRARY,
+            Resolution.ONE_DAY,
+            include_integrity=True,
+            calendar_strategy=AssetType.INDEX_US.calendar_strategy,
+            asset_type=AssetType.INDEX_US,
+        )
+        assert overview.symbols[0].issue_count == 0
+        assert overview.symbols[0].issues_summary == {}
+
+    def test_index_fast_read_includes_close_column(self) -> None:
+        """The non-integrity fast path must read volume AND close for index
+        assets, or null counting would classify the whole series as null."""
+        ghost = _ghost_storage(_index_frame_with_one_missing_session())
+        profile = _profile_symbol(
+            ghost,
+            INDEX_LIBRARY,
+            "VIX",
+            Resolution.ONE_DAY,
+            include_integrity=False,
+            calendar_strategy=None,
+            asset_type=AssetType.INDEX_US,
+        )
+        assert profile.null_bars == 1
+        columns = ghost.read.call_args.kwargs["columns"]
+        assert columns == ["volume", "close"]
+
+    def test_traded_fast_read_stays_volume_only(self) -> None:
+        ghost = _ghost_storage(make_ohlcv("2024-01-02 14:30", periods=3, freq="1h"))
+        _profile_symbol(
+            ghost,
+            "equities-1h-databento",
+            "AAPL",
+            Resolution.ONE_HOUR,
+            include_integrity=False,
+            calendar_strategy=None,
+        )
+        columns = ghost.read.call_args.kwargs["columns"]
+        assert columns == ["volume"]
+
+
+# ---------------------------------------------------------------------------
+# Standalone tools: real main() with LMDB-backed storage and --asset-type
+# ---------------------------------------------------------------------------
+
+
+def _run_tool_main(monkeypatch, tmp_path, module_name: str, argv: list[str]) -> Path:
+    """Invoke a standalone script's real main() against LMDB storage.
+
+    MinIO credentials are satisfied from env (never connecting — the storage
+    constructor is routed to LMDB), and the report path is returned.
+    """
+    import importlib
+    import sys
+
+    from fin3.config.settings import ClientConfig
+
+    module = importlib.import_module(module_name)
+    lmdb_path = str(tmp_path / "tools_lmdb")
+    storage = ArcticStorage.from_lmdb(lmdb_path)
+    monkeypatch.setattr(module, "ArcticStorage", lambda config: storage)
+    monkeypatch.setenv("FIN3_MINIO__ENDPOINT", "unused")
+    monkeypatch.setenv("FIN3_MINIO__ACCESS_KEY", "t")
+    monkeypatch.setenv("FIN3_MINIO__SECRET_KEY", "t")
+    monkeypatch.setattr(
+        ClientConfig,
+        "model_config",
+        {**ClientConfig.model_config.copy(), "env_file": None},
+    )
+    for key in list(os.environ):
+        if key.startswith("FIN3_PROVIDERS__"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(sys, "argv", argv)
+    module.main()
+    return tmp_path / "reports"
+
+
+class TestStandaloneTools:
+    @pytest.fixture()
+    def index_library_on_lmdb(self, tmp_path: Path) -> ArcticStorage:
+        """Same storage the tools will construct: seed the index library."""
+        lmdb_path = str(tmp_path / "tools_lmdb")
+        storage = ArcticStorage.from_lmdb(lmdb_path)
+        storage.ensure_library(INDEX_LIBRARY)
+        storage.write(INDEX_LIBRARY, "VIX", _index_frame_with_one_missing_session())
+        return storage
+
+    def test_audit_tool_reports_index_nulls_with_asset_type(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+        capsys,
+        index_library_on_lmdb: ArcticStorage,
+    ) -> None:
+        output_dir = tmp_path / "reports"
+        output_dir.mkdir()
+        report_path = _run_tool_main(
+            monkeypatch,
+            tmp_path,
+            "scripts.audit_library",
+            [
+                "audit_library.py",
+                INDEX_LIBRARY,
+                "--resolution",
+                "1d",
+                "--asset-type",
+                "index_us",
+                "--output",
+                str(output_dir),
+            ],
+        ) / f"{INDEX_LIBRARY}-audit.html"
+
+        out = capsys.readouterr().out
+        assert "1 symbols, 4 rows" in out
+        html = report_path.read_text(encoding="utf-8")
+        assert '<td class="num">4</td>' in html  # total bars
+        assert '<td class="num">1</td>' in html  # one missing session
+
+    def test_inspect_tool_reports_index_nulls_with_asset_type(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+        capsys,
+        index_library_on_lmdb: ArcticStorage,
+    ) -> None:
+        output_dir = tmp_path / "reports"
+        output_dir.mkdir()
+        report_path = _run_tool_main(
+            monkeypatch,
+            tmp_path,
+            "scripts.inspect_library",
+            [
+                "inspect_library.py",
+                INDEX_LIBRARY,
+                "--resolution",
+                "1d",
+                "--asset-type",
+                "index_us",
+                "--output",
+                str(output_dir),
+            ],
+        ) / f"{INDEX_LIBRARY}.html"
+
+        html = report_path.read_text(encoding="utf-8")
+        assert '<td class="num">4</td>' in html
+        assert '<td class="num">1</td>' in html
+
+    def test_audit_tool_defaults_to_equity_semantics(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+        capsys,
+        index_library_on_lmdb: ArcticStorage,
+    ) -> None:
+        """Omitting --asset-type keeps the historical equity default."""
+        output_dir = tmp_path / "reports"
+        output_dir.mkdir()
+        report_path = _run_tool_main(
+            monkeypatch,
+            tmp_path,
+            "scripts.audit_library",
+            [
+                "audit_library.py",
+                INDEX_LIBRARY,
+                "--resolution",
+                "1d",
+                "--output",
+                str(output_dir),
+            ],
+        ) / f"{INDEX_LIBRARY}-audit.html"
+
+        html = report_path.read_text(encoding="utf-8")
+        # Equity defaults: every zero-volume index row counts as null (4 of
+        # 4), which lands the symbol in the critical health tier.
+        assert html.count('<td class="num">4</td>') == 2  # total bars and null bars
+        assert "critical" in html

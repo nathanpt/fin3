@@ -379,12 +379,20 @@ def main() -> None:
         default=".",
         help="Output directory for the HTML file (default: current directory)",
     )
+    parser.add_argument(
+        "--asset-type",
+        default="equity_us",
+        choices=[a.value for a in AssetType],
+        help="Asset type selecting the calendar and observation semantics "
+        "(default: equity_us)",
+    )
     args = parser.parse_args()
 
     resolution = Resolution(args.resolution)
     config = ClientConfig()
     storage = ArcticStorage(config.minio)
-    calendar_strategy = AssetType.EQUITY_US.calendar_strategy
+    asset_type = AssetType(args.asset_type)
+    calendar_strategy = asset_type.calendar_strategy
 
     print(f"Auditing {args.library} ({resolution.value}) with integrity checks...")
     result = inspect_library(
@@ -393,6 +401,7 @@ def main() -> None:
         resolution,
         include_integrity=True,
         calendar_strategy=calendar_strategy,
+        asset_type=asset_type,
     )
     print(f"Done. {result.symbol_count} symbols, {result.total_rows:,} rows.")
 

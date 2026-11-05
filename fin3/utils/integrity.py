@@ -16,7 +16,7 @@ from typing import Literal
 
 import pandas as pd
 
-from fin3.schemas import Resolution, empty_ohlcv
+from fin3.schemas import AssetType, Resolution, empty_ohlcv
 from fin3.utils.rules import RuleContext, evaluate_rules
 
 
@@ -66,6 +66,8 @@ def check_integrity(
     df: pd.DataFrame | None,
     grid: pd.DatetimeIndex,
     resolution: Resolution,
+    *,
+    asset_type: AssetType | None = None,
 ) -> IntegrityReport:
     """Bar-level integrity audit of stored data against the expected master grid.
 
@@ -77,6 +79,10 @@ def check_integrity(
         Expected master grid of bar timestamps.
     resolution : Resolution
         Expected bar resolution.
+    asset_type : AssetType or None
+        Asset context; ``AssetType.INDEX_US`` selects the index volume
+        interpretation (observations carry volume 0 and are judged by close
+        presence).
 
     Returns
     -------
@@ -88,7 +94,9 @@ def check_integrity(
         # grid reports missing_bar via the registry like any other frame.
         df = empty_ohlcv()
 
-    context = RuleContext(resolution=resolution, scope="audit", grid=grid)
+    context = RuleContext(
+        resolution=resolution, scope="audit", grid=grid, asset_type=asset_type
+    )
     issues = [
         IntegrityIssue(
             severity=rule.severity,

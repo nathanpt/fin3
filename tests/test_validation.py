@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from fin3.exceptions import DataValidationError, SchemaValidationError
-from fin3.schemas import Resolution
+from fin3.schemas import AssetType, Resolution
 from fin3.utils.integrity import check_integrity
 from fin3.utils.validation import validate_raw_provider_data, validate_storage_artifact
 from structlog.testing import capture_logs
@@ -238,3 +238,63 @@ class TestPartialOhlcvWarning:
         with capture_logs() as cap:
             validate_raw_provider_data(df, Resolution.ONE_MINUTE)
         assert not any(e["event"] == "validation.partial_ohlcv" for e in cap)
+
+
+def _index_rows() -> pd.DataFrame:
+    """Two populated zero-volume daily index rows (session-open labels)."""
+    index = pd.DatetimeIndex(["2024-01-02T14:30:00Z", "2024-01-03T14:30:00Z"])
+    return pd.DataFrame(
+        {
+            "open": [20.0, 21.0],
+            "high": [20.0, 21.0],
+            "low": [20.0, 21.0],
+            "close": [20.0, 21.0],
+            "volume": [0.0, 0.0],
+        },
+        index=index,
+    )
+
+
+class TestIndexContextValidation:
+    """INDEX_US context: populated zero-volume rows are real observations.
+
+    Without the context the same rows keep the traded-bar semantics (stage-2
+    nan_semantics error) — the default is never silently weakened.
+    """
+
+    def test_populated_zero_volume_rows_pass_with_index_context(self) -> None:
+        df = _index_rows()
+        validate_raw_provider_data(df, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+        validate_storage_artifact(df, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+
+    def test_populated_zero_volume_rows_rejected_without_context(self) -> None:
+        df = _index_rows()
+        validate_raw_provider_data(df, Resolution.ONE_DAY)
+        with pytest.raises(DataValidationError) as excinfo:
+            validate_storage_artifact(df, Resolution.ONE_DAY)
+        assert excinfo.value.rule == "nan_semantics"
+
+    def test_nonzero_volume_index_row_rejected_stage2(self) -> None:
+        df = _index_rows()
+        df.iloc[1, df.columns.get_loc("volume")] = 1.0
+        validate_raw_provider_data(df, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+        with pytest.raises(DataValidationError) as excinfo:
+            validate_storage_artifact(df, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+        assert excinfo.value.rule == "nan_semantics"
+
+    def test_partial_index_row_warns_stage1_and_rejects_stage2(self) -> None:
+        df = _index_rows()
+        df.iloc[1, df.columns.get_loc("close")] = np.nan  # missing close = partial
+        with capture_logs() as cap:
+            validate_raw_provider_data(df, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+        events = [e for e in cap if e["event"] == "validation.partial_ohlcv"]
+        assert len(events) == 1
+        with pytest.raises(DataValidationError) as excinfo:
+            validate_storage_artifact(df, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)
+        assert excinfo.value.rule == "nan_semantics"
+
+    def test_padded_index_row_passes_stage2(self) -> None:
+        df = _index_rows()
+        df.loc[pd.Timestamp("2024-01-04T14:30:00Z")] = [np.nan] * 4 + [0.0]
+        df = df.sort_index()
+        validate_storage_artifact(df, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US)

@@ -201,6 +201,52 @@ Yahoo, Massive supports an arbitrary bar multiplier, so `4h` maps natively to
 no per-query cost, so `estimate_cost()` returns `0.0` and the `max_cost` ceiling
 is **not** enforced for this provider.
 
+### US volatility indexes via Cboe (VIX / VIX3M)
+
+Daily **close levels** (not returns) for the Cboe volatility indexes come from
+Cboe's published full-history CSVs — keyless and free to retrieve. The `cboe`
+provider serves `AssetType.INDEX_US` at `Resolution.ONE_DAY` only, for the
+exact symbols `VIX` and `VIX3M`. An observed index row stores the published
+close in all four OHLC fields with volume `0.0`; missing sessions remain
+all-NaN, zero-volume padding rows. Source dates align onto the NYSE (XNYS)
+session calendar, so a source row dated on a non-session day (e.g. July 4) is
+deliberately excluded from the standard path rather than shifted to a
+neighboring session. Direct provider `fetch()` calls still return such rows
+with their original UTC-midnight date labels.
+
+```python
+from fin3.config.settings import CboeConfig
+
+fetcher = MarketDataFetcher(
+    ClientConfig(
+        minio=MinioConfig(endpoint="localhost:9000", access_key="...", secret_key="..."),
+        providers={"cboe": CboeConfig()},
+    )
+)
+
+df = fetcher.get_data(
+    asset_type=AssetType.INDEX_US,
+    provider="cboe",
+    resolution=Resolution.ONE_DAY,
+    symbols=["VIX", "VIX3M"],
+    start=datetime(2016, 1, 4, tzinfo=timezone.utc),
+    end=datetime(2026, 11, 4, tzinfo=timezone.utc),
+)
+```
+
+**Warning — availability time:** stored daily close bars keep fin3's
+session-open row labels (e.g. `14:30 UTC` for NYSE sessions), **not** the time
+at which the close actually became available. A close for day *T* is known
+only after day *T*'s close; never treat it as information known at the
+session open (e.g. a strategy trading at day *T*'s open must not use day
+*T*'s close).
+
+Data source: Cboe full-history CSVs
+(`https://cdn-api.cboe.com/api/global/us_indices/daily_prices/<SYMBOL>_History.csv`),
+consumed under the published Cboe website terms. Intended for personal,
+non-commercial, non-redistributed research use; do not redistribute
+Cboe-derived data.
+
 ### Crypto (24/7 markets)
 
 Crypto uses the continuous 24/7 calendar (no weekend/holiday gaps). Binance is
@@ -322,7 +368,7 @@ version: 1
 id: research-bars
 libraries:
   crypto-hourly:
-    asset_type: crypto          # equity_us | crypto | futures
+    asset_type: crypto          # equity_us | crypto | futures | index_us
     provider: binance
     resolution: 1h
     calendar: 24x7              # optional; derived from asset type

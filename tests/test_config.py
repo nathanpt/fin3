@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from fin3.config.settings import (
     BinanceConfig,
+    CboeConfig,
     ClientConfig,
     DatabentoConfig,
     MassiveConfig,
@@ -172,3 +173,46 @@ class TestProviderUnionFromUntypedEnv:
         assert type(yahoo) is YahooConfig
         assert yahoo.provider_type == "yahoo"
         assert yahoo.auto_adjust is False
+
+
+class TestCboeConfig:
+    def test_defaults(self) -> None:
+        config = CboeConfig()
+        assert config.provider_type == "cboe"
+        assert (
+            config.base_url
+            == "https://cdn-api.cboe.com/api/global/us_indices/daily_prices"
+        )
+        assert config.timeout == 30.0
+        assert config.cache_ttl_seconds == 300.0
+
+    def test_blank_base_url_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="Cboe base_url must be nonempty"):
+            CboeConfig(base_url="   ")
+
+    def test_base_url_stripped(self) -> None:
+        config = CboeConfig(base_url="  https://example.com/api  ")
+        assert config.base_url == "https://example.com/api"
+
+    def test_positive_durations_enforced(self) -> None:
+        with pytest.raises(ValidationError):
+            CboeConfig(timeout=0.0)
+        with pytest.raises(ValidationError):
+            CboeConfig(cache_ttl_seconds=-1.0)
+
+    def test_cboe_provider_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FIN3_MINIO__ENDPOINT", "localhost:9000")
+        monkeypatch.setenv("FIN3_MINIO__ACCESS_KEY", "minioadmin")
+        monkeypatch.setenv("FIN3_MINIO__SECRET_KEY", "minioadmin")
+        monkeypatch.setenv("FIN3_PROVIDERS__CBOE__PROVIDER_TYPE", "cboe")
+        config = ClientConfig()  # type: ignore[call-arg]
+        cboe = config.providers["cboe"]
+        assert type(cboe) is CboeConfig
+        assert cboe.provider_type == "cboe"
+
+    def test_cboe_joins_discriminated_union(self) -> None:
+        config = ClientConfig(
+            minio=MinioConfig(endpoint="localhost:9000", access_key="a", secret_key="b"),
+            providers={"cboe": CboeConfig()},
+        )
+        assert type(config.providers["cboe"]) is CboeConfig

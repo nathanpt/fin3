@@ -20,7 +20,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from fin3.schemas import OHLCV_COLUMNS, Resolution
+from fin3.schemas import OHLCV_COLUMNS, AssetType, Resolution
 
 Severity = Literal["error", "warning"]
 Scope = Literal["stage1", "stage2", "audit"]
@@ -43,11 +43,18 @@ _OUTLIER_SCALE = 0.6744897501960817
 
 @dataclass(frozen=True)
 class RuleContext:
-    """Evaluation context for one rule pass over a frame."""
+    """Evaluation context for one rule pass over a frame.
+
+    ``asset_type`` carries the asset context (``None`` keeps traded-bar
+    semantics). Only the volume-dependent interpretation differs for
+    ``AssetType.INDEX_US`` — index observations legitimately carry volume 0 —
+    every structural rule is identical.
+    """
 
     resolution: Resolution
     scope: Scope
     grid: pd.DatetimeIndex | None = None
+    asset_type: AssetType | None = None
 
 
 @dataclass(frozen=True)
@@ -99,11 +106,21 @@ def _first_position(mask: pd.Series) -> int:
     return int(np.flatnonzero(mask.to_numpy())[0])
 
 
-def _partial_ohlcv_mask(df: pd.DataFrame) -> pd.Series:
-    """Positive-volume rows where some present OHLC column is NaN."""
+def _partial_ohlcv_mask(
+    df: pd.DataFrame, asset_type: AssetType | None = None
+) -> pd.Series:
+    """Rows where some OHLC cells are missing.
+
+    Traded-bar contexts (default) require positive volume, mirroring the
+    historical detection. Index contexts flag any row with some but not all
+    OHLC present — a missing close is also found, all-NaN padding is not a
+    partial observation, and volume plays no role.
+    """
     ohlc = [c for c in _OHLC if c in df.columns]
-    partial = (df["volume"] > 0) & ~df[ohlc].notna().all(axis=1)
-    return partial
+    ohlc_na = df[ohlc].isna()
+    if asset_type is AssetType.INDEX_US:
+        return ohlc_na.any(axis=1) & ~ohlc_na.all(axis=1)
+    return (df["volume"] > 0) & ohlc_na.any(axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +251,30 @@ def _nan_semantics_findings(df: pd.DataFrame, ctx: RuleContext) -> tuple[Finding
     all_nan = ohlc_na.all(axis=1)
 
     findings: list[Finding] = []
+    if ctx.asset_type is AssetType.INDEX_US:
+        # Index observations carry volume exactly 0 and all-or-nothing OHLC.
+        # A populated close with any missing sibling cell is a corruption
+        # signal, not a partial write; nonzero volume is equally impossible.
+        nonzero = vol != 0
+        count = int(nonzero.sum())
+        if count > 0:
+            findings.append(
+                Finding(
+                    f"{count} bar(s) with volume != 0 "
+                    "(index observations carry volume exactly 0)",
+                    df.index[_first_position(nonzero)],
+                )
+            )
+        partial = any_nan & ~all_nan
+        count = int(partial.sum())
+        if count > 0:
+            findings.append(
+                Finding(
+                    f"{count} bar(s) with some but not all OHLC populated",
+                    df.index[_first_position(partial)],
+                )
+            )
+        return tuple(findings)
     # volume > 0 but OHLC has NaN
     positive_with_nan = (vol > 0) & any_nan
     count = int(positive_with_nan.sum())
@@ -264,12 +305,13 @@ def _ohlcv_violation_findings(df: pd.DataFrame, ctx: RuleContext) -> tuple[Findi
         return ()
     o, h, low_, c = df["open"], df["high"], df["low"], df["close"]
     complete = o.notna() & h.notna() & low_.notna() & c.notna()
-    if ctx.scope == "stage1":
+    if ctx.scope == "stage1" or ctx.asset_type is AssetType.INDEX_US:
         eligible = complete
     else:
-        # Stage 2 and audit judge the storage contract: only positive-volume
-        # rows must satisfy OHLC consistency. Zero-volume populated rows are
-        # covered by nan_semantics.
+        # Stage 2 and audit judge the traded-bar storage contract: only
+        # positive-volume rows must satisfy OHLC consistency. Zero-volume
+        # populated traded rows are covered by nan_semantics. Index rows are
+        # always checked — their volume is legitimately zero.
         eligible = complete & (df["volume"] > 0)
     ok = (low_ <= o) & (o <= h) & (low_ <= c) & (c <= h)
     bad = eligible & ~ok
@@ -294,8 +336,16 @@ def _partial_ohlcv_findings(df: pd.DataFrame, ctx: RuleContext) -> tuple[Finding
         return ()
     if not any(c in df.columns for c in _OHLC):
         return ()
-    partial = _partial_ohlcv_mask(df)
+    partial = _partial_ohlcv_mask(df, ctx.asset_type)
     positions = np.flatnonzero(partial.to_numpy())[:3]
+    if ctx.asset_type is AssetType.INDEX_US:
+        return tuple(
+            Finding(
+                f"some but not all OHLC present at {df.index[pos]}",
+                df.index[pos],
+            )
+            for pos in positions
+        )
     return tuple(
         Finding(
             f"volume>0 but some OHLC are NaN at {df.index[pos]}",
@@ -308,7 +358,7 @@ def _partial_ohlcv_findings(df: pd.DataFrame, ctx: RuleContext) -> tuple[Finding
 def _statistical_outlier_findings(
     df: pd.DataFrame, ctx: RuleContext
 ) -> tuple[Finding, ...]:
-    mask = _statistical_outlier_mask(df, ctx.resolution)
+    mask = _statistical_outlier_mask(df, ctx.resolution, asset_type=ctx.asset_type)
     count = int(mask.sum())
     if count == 0:
         return ()
@@ -318,12 +368,19 @@ def _statistical_outlier_findings(
     )
 
 
-def _statistical_outlier_mask(df: pd.DataFrame, resolution: Resolution) -> pd.Series:
+def _statistical_outlier_mask(
+    df: pd.DataFrame,
+    resolution: Resolution,
+    *,
+    asset_type: AssetType | None = None,
+) -> pd.Series:
     """Boolean mask of statistical close-return outliers, aligned to *df*.
 
     Deterministic and advisory: a return is eligible only when the two
-    original adjacent rows have finite strictly positive close and volume
-    and their timestamp difference equals exactly the resolution (missing
+    original adjacent rows have finite strictly positive close and finite
+    volume — which must additionally be strictly positive for traded-bar
+    contexts, while index observations legitimately carry volume 0 — and
+    their timestamp difference equals exactly the resolution (missing
     bars are never bridged). Eligible returns are scored against the median
     absolute deviation; a score above ``_OUTLIER_THRESHOLD`` flags the
     ending row of the pair. Fewer than ``_OUTLIER_MIN_RETURNS`` eligible
@@ -344,7 +401,9 @@ def _statistical_outlier_mask(df: pd.DataFrame, resolution: Resolution) -> pd.Se
     gap_ok = index.to_series().diff().eq(delta).to_numpy()
     close = df["close"].to_numpy(dtype=float)
     volume = df["volume"].to_numpy(dtype=float)
-    usable = np.isfinite(close) & (close > 0) & np.isfinite(volume) & (volume > 0)
+    usable = np.isfinite(close) & (close > 0) & np.isfinite(volume)
+    if asset_type is not AssetType.INDEX_US:
+        usable &= volume > 0
 
     eligible = np.zeros(len(df), dtype=bool)
     eligible[1:] = gap_ok[1:] & usable[:-1] & usable[1:]
@@ -450,8 +509,9 @@ RULES: tuple[Rule, ...] = (
         name="nan_semantics",
         severity="error",
         description=(
-            "Inconsistent NaN semantics: volume>0 with NaN OHLC, or volume=0 "
-            "with non-NaN OHLC."
+            "Inconsistent NaN semantics. Traded bars: volume>0 with NaN "
+            "OHLC, or volume=0 with non-NaN OHLC. Index rows (index_us): "
+            "volume must be exactly 0 with either all or no OHLC populated."
         ),
         scopes=_STAGE2_AUDIT,
         predicate=_nan_semantics_findings,
@@ -471,8 +531,10 @@ RULES: tuple[Rule, ...] = (
         name="partial_ohlcv",
         severity="warning",
         description=(
-            "Positive-volume rows with some OHLC cells missing (Stage-1 "
-            "advisory; the audit has no partial-cell category)."
+            "Rows with some OHLC cells missing (Stage-1 advisory; the audit "
+            "has no partial-cell category). Traded-bar rows additionally "
+            "require positive volume; index rows are flagged when some but "
+            "not all OHLC are present."
         ),
         scopes=_STAGE1_ONLY,
         predicate=_partial_ohlcv_findings,

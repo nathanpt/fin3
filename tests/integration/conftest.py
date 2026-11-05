@@ -1,13 +1,17 @@
 """Shared fixtures for integration tests.
 
-Requires environment variables (set via .env or export):
+Each integration fixture skips explicitly when its own prerequisite is
+absent (set via .env or export):
   FIN3_MINIO__ENDPOINT      — e.g. "localhost:9000"
   FIN3_MINIO__ACCESS_KEY
   FIN3_MINIO__SECRET_KEY
   FIN3_PROVIDERS__DATABENTO__API_KEY   — Databento API key (db-...)
 
-Run with:
-  uv run pytest tests/integration/ -m integration -v
+A missing MinIO setting skips MinIO-dependent tests; a missing Databento key
+skips only Databento-dependent tests. No module is hidden from collection,
+and no unrelated credential (e.g. a provider key) can mask another test's
+prerequisite. Default exclusion comes from pyproject addopts
+(``-m "not integration"``); opt in with ``pytest -m integration``.
 """
 
 import os
@@ -33,27 +37,8 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
-# ---------------------------------------------------------------------------
-# Skip entire module when integration deps are missing
-# ---------------------------------------------------------------------------
-
-def _has_integration_env() -> bool:
-    return bool(
-        _env("FIN3_MINIO__ENDPOINT")
-        and _env("FIN3_MINIO__ACCESS_KEY")
-        and _env("FIN3_MINIO__SECRET_KEY")
-        and _env("FIN3_PROVIDERS__DATABENTO__API_KEY")
-    )
-
-
 # NOTE: `pytestmark` set here would be inert (pytest only reads it from test
-# modules), so every integration test module declares it itself. Default
-# exclusion comes from pyproject addopts (`-m "not integration"`); opt in with
-# `pytest -m integration`.
-
-if not _has_integration_env():
-    collect_ignore_glob = ["*.py"]
-
+# modules), so every integration test module declares it itself.
 
 # ---------------------------------------------------------------------------
 # Config fixtures
@@ -64,6 +49,17 @@ TEST_BUCKET = "test-integration-e2e"
 
 @pytest.fixture(scope="session")
 def minio_config() -> MinioConfig:
+    missing = [
+        setting
+        for setting in (
+            "FIN3_MINIO__ENDPOINT",
+            "FIN3_MINIO__ACCESS_KEY",
+            "FIN3_MINIO__SECRET_KEY",
+        )
+        if not _env(setting)
+    ]
+    if missing:
+        pytest.skip(f"MinIO integration settings absent: {', '.join(missing)}")
     return MinioConfig(
         endpoint=_env("FIN3_MINIO__ENDPOINT"),
         access_key=_env("FIN3_MINIO__ACCESS_KEY"),
@@ -75,6 +71,8 @@ def minio_config() -> MinioConfig:
 
 @pytest.fixture(scope="session")
 def databento_config() -> DatabentoConfig:
+    if not _env("FIN3_PROVIDERS__DATABENTO__API_KEY"):
+        pytest.skip("Databento API key absent (FIN3_PROVIDERS__DATABENTO__API_KEY)")
     return DatabentoConfig(
         api_key=_env("FIN3_PROVIDERS__DATABENTO__API_KEY"),
         dataset=_env("FIN3_PROVIDERS__DATABENTO__DATASET", "XNAS.ITCH"),

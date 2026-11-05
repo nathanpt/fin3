@@ -148,6 +148,7 @@ class MarketDataFetcher:
             resolution,
             include_integrity=include_integrity,
             calendar_strategy=strategy,
+            asset_type=asset_type,
         )
 
     def defragment(
@@ -352,7 +353,7 @@ class MarketDataFetcher:
             resolution,
         )
 
-        reindexed = _prepare_ohlcv(raw_df, grid, resolution)
+        reindexed = _prepare_ohlcv(raw_df, grid, resolution, asset_type=asset_type)
 
         metadata = _write_metadata(symbol, provider, gap_start, gap_end)
 
@@ -378,7 +379,11 @@ class MarketDataFetcher:
 
 
 def _prepare_ohlcv(
-    raw_df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resolution
+    raw_df: pd.DataFrame,
+    grid: pd.DatetimeIndex,
+    resolution: Resolution,
+    *,
+    asset_type: AssetType | None = None,
 ) -> pd.DataFrame:
     """Prepare raw provider data for storage against *grid*.
 
@@ -386,14 +391,15 @@ def _prepare_ohlcv(
     ``_fill_gap`` pipeline order: finer-resolution aggregation (skipped for a
     single raw bar, which has no meaningful median spacing), Stage-1 raw
     validation, timestamp snapping to the grid, reindex padding, Stage-2
-    artifact validation, and the boundary check.
+    artifact validation, and the boundary check. ``asset_type`` selects the
+    volume interpretation for both validation stages.
     """
     # Aggregate if provider returns finer-grained bars than requested
     # (e.g. 1m bars for a 5m/15m resolution, or 1h bars for 4h).
     if not raw_df.empty and len(raw_df) > 1:
         raw_df = _aggregate_bars(raw_df, resolution)
 
-    validate_raw_provider_data(raw_df, resolution)
+    validate_raw_provider_data(raw_df, resolution, asset_type=asset_type)
 
     # Providers may return bars at timestamps that don't align with the
     # calendar grid (e.g. daily bars at midnight UTC vs market-open,
@@ -404,7 +410,7 @@ def _prepare_ohlcv(
 
     reindexed = _reindex(raw_df, grid)
 
-    validate_storage_artifact(reindexed, resolution)
+    validate_storage_artifact(reindexed, resolution, asset_type=asset_type)
 
     _assert_boundary(reindexed, grid)
 
@@ -419,6 +425,11 @@ def _validate_inputs(
     start: datetime,
     end: datetime,
 ) -> None:
+    if (
+        asset_type is AssetType.INDEX_US
+        and resolution is not Resolution.ONE_DAY
+    ):
+        raise ValueError("index_us supports only resolution 1d")
     if not symbols:
         raise ValueError("symbols must be a non-empty list")
     # Reject obviously-invalid symbols (e.g. "...", "???", "---") early with a

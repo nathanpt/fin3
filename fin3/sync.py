@@ -30,7 +30,7 @@ from fin3.exceptions import (
 from fin3.manifest import ResolvedDataset, ResolvedManifest
 from fin3.providers import ProviderRegistry
 from fin3.providers.base import DataProvider
-from fin3.schemas import METADATA_LIBRARY, AssetType
+from fin3.schemas import METADATA_LIBRARY, AssetType, observation_mask
 from fin3.storage.arctic import ArcticStorage
 from fin3.utils.validation import validate_storage_artifact
 
@@ -695,7 +695,9 @@ class ManifestRunner:
             asset_type=dataset.asset_type,
         )
 
-        prepared = _prepare_ohlcv(raw, chunk.stamps, dataset.resolution)
+        prepared = _prepare_ohlcv(
+            raw, chunk.stamps, dataset.resolution, asset_type=dataset.asset_type
+        )
         selected = prepared.loc[chunk.write_stamps]
 
         # An empty or entirely unmappable response must not fabricate a
@@ -716,8 +718,9 @@ class ManifestRunner:
                 date_range=(chunk.write_start, chunk.write_end),
             )
 
-        # Refresh safety: never replace an existing positive-volume
-        # observation with synthesized no-trade padding.
+        # Refresh safety: never replace an existing observation with
+        # synthesized no-trade padding. For traded bars an observation is a
+        # positive-volume row; for index data it is a populated close.
         if (
             plan.action == "refresh"
             and existing_span is not None
@@ -728,16 +731,24 @@ class ManifestRunner:
                 existing_span = existing_span.copy()
                 existing_span.index = idx.tz_localize("UTC")
             regressed = synthesized & (chunk.write_stamps.isin(existing_span.index))
+            observed = observation_mask(existing_span, asset_type=dataset.asset_type)
             for stamp in chunk.write_stamps[regressed]:
-                prior_volume = existing_span.loc[stamp].get("volume")
-                if pd.notna(prior_volume) and float(prior_volume) > 0:
+                if not bool(observed.loc[stamp]):
+                    continue
+                if dataset.asset_type is AssetType.INDEX_US:
                     raise DataValidationError(
-                        f"refresh would replace positive-volume observation at "
+                        f"refresh would replace index observation at "
                         f"{stamp.isoformat()} with synthesized no-trade padding"
                     )
+                raise DataValidationError(
+                    f"refresh would replace positive-volume observation at "
+                    f"{stamp.isoformat()} with synthesized no-trade padding"
+                )
 
         merged = _merge_for_commit(existing_span, selected, chunk.write_stamps)
-        validate_storage_artifact(merged, dataset.resolution)
+        validate_storage_artifact(
+            merged, dataset.resolution, asset_type=dataset.asset_type
+        )
 
         metadata = _write_metadata(
             plan.symbol, provider, chunk.write_start, chunk.write_end

@@ -33,6 +33,7 @@ class AssetType(str, Enum):
     EQUITY_US = "equity_us"
     CRYPTO = "crypto"
     FUTURES = "futures"
+    INDEX_US = "index_us"
 
     @property
     def calendar_strategy(self) -> CalendarStrategy:
@@ -51,6 +52,11 @@ class AssetType(str, Enum):
             AssetType.EQUITY_US: "XNYS",
             AssetType.CRYPTO: None,
             AssetType.FUTURES: "CME",
+            # XNYS is an explicit equity-session alignment proxy for US index
+            # levels: it provides holiday/session labels so close levels land
+            # on equity-session stamps. It is NOT a claim that the index
+            # trades on NYSE.
+            AssetType.INDEX_US: "XNYS",
         }
         return mapping[self]
 
@@ -106,9 +112,28 @@ def library_name(asset_type: AssetType, resolution: Resolution, provider: str) -
         AssetType.EQUITY_US: "equities",
         AssetType.CRYPTO: "crypto",
         AssetType.FUTURES: "futures",
+        AssetType.INDEX_US: "indices",
     }
     prefix = _ASSET_PREFIX.get(asset_type, asset_type.value)
     return f"{prefix}-{resolution.value}-{provider}"
+
+
+def observation_mask(
+    df: pd.DataFrame, *, asset_type: AssetType | None = None
+) -> pd.Series:
+    """Return the boolean mask of observed (non-padding) bars in *df*.
+
+    US-index observations are identified by a populated ``close``: published
+    index levels legitimately carry volume 0, so volume cannot distinguish
+    an observation from synthesized padding there. Every other — and the
+    default — context keeps the traded-volume convention: ``volume > 0``.
+
+    Call only after the required columns (``close``/``volume``) are
+    established on *df*.
+    """
+    if asset_type is AssetType.INDEX_US:
+        return df["close"].notna()
+    return df["volume"] > 0
 
 
 METADATA_LIBRARY = "fin3-metadata"

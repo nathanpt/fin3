@@ -14,7 +14,7 @@ import pandas as pd
 import structlog
 
 from fin3.exceptions import DataValidationError, SchemaValidationError
-from fin3.schemas import Resolution
+from fin3.schemas import AssetType, Resolution
 from fin3.utils.rules import RuleContext, Scope, evaluate_rules
 
 logger = structlog.get_logger(__name__)
@@ -51,9 +51,11 @@ def _validate(
     resolution: Resolution,
     scope: Scope,
     error_types: dict[str, type[DataValidationError]],
+    *,
+    asset_type: AssetType | None = None,
 ) -> None:
     """Evaluate the registry for *scope*, raising on the first error."""
-    context = RuleContext(resolution=resolution, scope=scope)
+    context = RuleContext(resolution=resolution, scope=scope, asset_type=asset_type)
     for rule, finding in evaluate_rules(df, context):
         if rule.severity == "error":
             error = error_types[rule.name](f"[{scope}] {rule.name}: {finding.detail}")
@@ -67,20 +69,34 @@ def _validate(
             )
 
 
-def validate_raw_provider_data(df: pd.DataFrame, resolution: Resolution) -> None:
+def validate_raw_provider_data(
+    df: pd.DataFrame,
+    resolution: Resolution,
+    *,
+    asset_type: AssetType | None = None,
+) -> None:
     """Stage 1: structural validation on raw provider data (pre-reindex).
 
     Accepts partial/sparse data and populated zero-volume bars. Rejects
     corrupt structural issues. Prices and volume must be non-negative.
+    ``asset_type`` selects the volume interpretation (index rows are judged
+    by close presence, not traded volume).
     """
-    _validate(df, resolution, "stage1", _STAGE1_ERROR_TYPES)
+    _validate(df, resolution, "stage1", _STAGE1_ERROR_TYPES, asset_type=asset_type)
 
 
-def validate_storage_artifact(df: pd.DataFrame, resolution: Resolution) -> None:
+def validate_storage_artifact(
+    df: pd.DataFrame,
+    resolution: Resolution,
+    *,
+    asset_type: AssetType | None = None,
+) -> None:
     """Stage 2: strict validation on the fully-padded storage artifact (post-reindex).
 
-    The artifact must conform to the NaN semantics: volume=0 implies all OHLC
-    NaN, volume>0 implies no NaN in any OHLCV column. Prices and volume must
-    be non-negative.
+    The artifact must conform to the NaN semantics: for traded bars, volume=0
+    implies all OHLC NaN and volume>0 implies no NaN in any OHLCV column; for
+    index rows (``asset_type=AssetType.INDEX_US``), volume must be exactly 0
+    with either all or no OHLC populated. Prices and volume must be
+    non-negative.
     """
-    _validate(df, resolution, "stage2", _STAGE2_ERROR_TYPES)
+    _validate(df, resolution, "stage2", _STAGE2_ERROR_TYPES, asset_type=asset_type)

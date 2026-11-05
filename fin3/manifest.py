@@ -48,6 +48,7 @@ _DEFAULT_CALENDAR: dict[AssetType, str] = {
     AssetType.EQUITY_US: "XNYS",
     AssetType.FUTURES: "CME",
     AssetType.CRYPTO: "24x7",
+    AssetType.INDEX_US: "XNYS",
 }
 
 
@@ -192,6 +193,11 @@ class LibraryEntry(BaseModel):
 
     @model_validator(mode="after")
     def _resolve_calendar(self) -> "LibraryEntry":
+        if (
+            self.asset_type is AssetType.INDEX_US
+            and self.resolution is not Resolution.ONE_DAY
+        ):
+            raise ValueError("index_us supports only resolution 1d")
         expected = _DEFAULT_CALENDAR[self.asset_type]
         if self.calendar is None:
             self.calendar = expected

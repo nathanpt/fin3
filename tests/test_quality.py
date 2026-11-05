@@ -32,7 +32,7 @@ from structlog.testing import capture_logs
 
 from fin3.core import _prepare_ohlcv
 from fin3.exceptions import DataValidationError, SchemaValidationError
-from fin3.schemas import OHLCV_COLUMNS, Resolution, empty_ohlcv
+from fin3.schemas import OHLCV_COLUMNS, AssetType, Resolution, empty_ohlcv
 from fin3.utils.integrity import check_integrity
 from fin3.utils.rules import RULES, Scope, _statistical_outlier_mask
 from fin3.utils.validation import validate_raw_provider_data, validate_storage_artifact
@@ -40,7 +40,7 @@ from tests.conftest import make_ohlcv
 
 ONE_MINUTE = Resolution.ONE_MINUTE
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "quality"
-PROVIDERS = ("databento", "binance", "massive", "yahoo")
+PROVIDERS = ("databento", "binance", "massive", "yahoo", "cboe")
 
 SpecFrame = dict
 Expectation = tuple[type[BaseException], str] | Literal["accept", "accept_partial"]
@@ -68,8 +68,12 @@ def _load_spec(provider: str) -> dict:
         pytest.fail(f"malformed quality fixture {path}: {exc}")
     if set(spec) != _TOP_LEVEL_KEYS:
         pytest.fail(f"{path}: unexpected top-level keys {sorted(spec)}")
-    if spec["resolution"] != "1m":
-        pytest.fail(f"{path}: expected resolution '1m', got {spec['resolution']!r}")
+    expected_resolution = "1d" if provider == "cboe" else "1m"
+    if spec["resolution"] != expected_resolution:
+        pytest.fail(
+            f"{path}: expected resolution {expected_resolution!r}, "
+            f"got {spec['resolution']!r}"
+        )
     return spec
 
 
@@ -97,6 +101,10 @@ def _raw_input(provider: str, spec: dict) -> object:
         return [list(row) for row in raw]
     if provider == "massive":
         return [dict(row) for row in raw]
+    if provider == "cboe":
+        if not isinstance(raw, str):
+            pytest.fail(f"{provider}: raw must be the CSV document as a string")
+        return raw.encode("utf-8")
     pytest.fail(f"no raw decoder for provider {provider}")
 
 
@@ -105,12 +113,23 @@ _NORMALISER_MODULES = {
     "binance": "fin3.providers.binance",
     "massive": "fin3.providers.massive",
     "yahoo": "fin3.providers.yfinance",
+    "cboe": "fin3.providers.cboe",
 }
 
 
 def _normalise(provider: str, raw: object) -> pd.DataFrame:
     module = import_module(_NORMALISER_MODULES[provider])
     return module._normalise(raw)
+
+
+def _context(provider: str) -> tuple[Resolution, AssetType | None]:
+    """Per-provider validation context from the fixture's own resolution.
+
+    Cboe index data validates at ``1d`` with the INDEX_US volume
+    interpretation; every other provider keeps the traded-bar defaults.
+    """
+    resolution = Resolution(_load_spec(provider)["resolution"])
+    return resolution, (AssetType.INDEX_US if provider == "cboe" else None)
 
 
 @lru_cache(maxsize=None)
@@ -152,6 +171,8 @@ def _mutate(frame: pd.DataFrame, mutation: str) -> pd.DataFrame:
         df.iloc[0, col("open")] = np.nan
     elif mutation == "volume_zero":
         df.iloc[0, col("volume")] = 0.0
+    elif mutation == "volume_positive":
+        df.iloc[0, col("volume")] = 1.0
     elif mutation == "shift_second_back":
         stamps = df.index.to_list()
         stamps[1] = stamps[1] - pd.Timedelta(seconds=30)
@@ -173,11 +194,17 @@ def _mutate(frame: pd.DataFrame, mutation: str) -> pd.DataFrame:
 
 @dataclass(frozen=True)
 class Mutation:
-    """One golden mutation and the exact outcome of each write stage."""
+    """One golden mutation and the exact outcome of each write stage.
+
+    ``partial_row`` is the mutated frame position expected to carry the
+    Stage-1 ``partial_ohlcv`` warning when a stage expects ``accept_partial``
+    (index position into the mutated frame; default first row).
+    """
 
     target: Literal["normalized", "artifact"]
     stage1: Expectation
     stage2: Expectation
+    partial_row: int = 0
 
 
 MUTATIONS: dict[str, Mutation] = {
@@ -234,19 +261,59 @@ MUTATIONS: dict[str, Mutation] = {
 }
 
 
-def _assert_stage(validator: Callable[..., None], df: pd.DataFrame, expectation: Expectation) -> None:
+def _provider_mutations(provider: str) -> dict[str, Mutation]:
+    """Provider-scoped mutation cases.
+
+    Existing providers keep the exact shared cases. Cboe index rows already
+    carry volume 0 everywhere, so ``volume_zero`` is tautological and omitted;
+    ``volume_positive`` becomes the index-specific violation (a nonzero
+    volume on an index row is impossible), and ``null_row_close_populated``
+    is a Stage-1 partial observation warning because the context detects
+    some-but-not-all OHLC regardless of volume.
+    """
+    if provider != "cboe":
+        return MUTATIONS
+    cases = {key: value for key, value in MUTATIONS.items() if key != "volume_zero"}
+    cases["volume_positive"] = Mutation(
+        "normalized", "accept", (DataValidationError, "nan_semantics")
+    )
+    cases["null_row_close_populated"] = Mutation(
+        "artifact",
+        "accept_partial",
+        (DataValidationError, "nan_semantics"),
+        partial_row=2,
+    )
+    return cases
+
+
+_MUTATION_CASES = [
+    (provider, mutation_id)
+    for provider in PROVIDERS
+    for mutation_id in sorted(_provider_mutations(provider))
+]
+
+
+def _assert_stage(
+    validator: Callable[..., None],
+    df: pd.DataFrame,
+    expectation: Expectation,
+    *,
+    resolution: Resolution = ONE_MINUTE,
+    asset_type: AssetType | None = None,
+    partial_ts: pd.Timestamp | None = None,
+) -> None:
     if expectation == "accept":
-        validator(df, ONE_MINUTE)
+        validator(df, resolution, asset_type=asset_type)
     elif expectation == "accept_partial":
         with capture_logs() as cap:
-            validator(df, ONE_MINUTE)
+            validator(df, resolution, asset_type=asset_type)
         events = [e for e in cap if e["event"] == "validation.partial_ohlcv"]
         assert len(events) == 1
-        assert events[0]["timestamp"] == df.index[0]
+        assert events[0]["timestamp"] == (partial_ts if partial_ts is not None else df.index[0])
     else:
         exc_type, rule = expectation
         with pytest.raises(exc_type) as excinfo:
-            validator(df, ONE_MINUTE)
+            validator(df, resolution, asset_type=asset_type)
         assert type(excinfo.value) is exc_type
         assert excinfo.value.rule == rule
 
@@ -273,7 +340,13 @@ class TestGoldenNormalization:
         spec = _load_spec(provider)
         expected_artifact = _expected_frame(spec["artifact"], "artifact")
         normalized = _normalise(provider, _raw_input(provider, spec))
-        artifact = _prepare_ohlcv(normalized, expected_artifact.index, ONE_MINUTE)
+        resolution, asset_type = _context(provider)
+        artifact = _prepare_ohlcv(
+            normalized,
+            expected_artifact.index,
+            resolution,
+            asset_type=asset_type,
+        )
         pd.testing.assert_frame_equal(
             artifact, expected_artifact, check_exact=True, check_dtype=False, check_freq=False
         )
@@ -283,23 +356,47 @@ class TestGoldenNormalization:
         """The existing null row is a passing boundary, not a violation."""
         spec = _load_spec(provider)
         normalized = _normalise(provider, _raw_input(provider, spec))
-        artifact = _prepare_ohlcv(normalized, _expected_frame(spec["artifact"], "artifact").index, ONE_MINUTE)
-        validate_raw_provider_data(artifact, ONE_MINUTE)
-        validate_storage_artifact(artifact, ONE_MINUTE)
+        resolution, asset_type = _context(provider)
+        artifact = _prepare_ohlcv(
+            normalized,
+            _expected_frame(spec["artifact"], "artifact").index,
+            resolution,
+            asset_type=asset_type,
+        )
+        validate_raw_provider_data(artifact, resolution, asset_type=asset_type)
+        validate_storage_artifact(artifact, resolution, asset_type=asset_type)
 
-    @pytest.mark.parametrize("provider", PROVIDERS)
-    @pytest.mark.parametrize("mutation_id", sorted(MUTATIONS))
+    @pytest.mark.parametrize(("provider", "mutation_id"), _MUTATION_CASES)
     def test_golden_mutation(self, provider: str, mutation_id: str) -> None:
-        mutation = MUTATIONS[mutation_id]
+        mutation = _provider_mutations(provider)[mutation_id]
         spec = _load_spec(provider)
         normalized = _normalise(provider, _raw_input(provider, spec))
+        resolution, asset_type = _context(provider)
         if mutation.target == "normalized":
             frame = normalized
         else:
-            frame = _prepare_ohlcv(normalized, _expected_frame(spec["artifact"], "artifact").index, ONE_MINUTE)
+            frame = _prepare_ohlcv(
+                normalized,
+                _expected_frame(spec["artifact"], "artifact").index,
+                resolution,
+                asset_type=asset_type,
+            )
         mutated = _mutate(frame, mutation_id)
-        _assert_stage(validate_raw_provider_data, mutated, mutation.stage1)
-        _assert_stage(validate_storage_artifact, mutated, mutation.stage2)
+        _assert_stage(
+            validate_raw_provider_data,
+            mutated,
+            mutation.stage1,
+            resolution=resolution,
+            asset_type=asset_type,
+            partial_ts=mutated.index[mutation.partial_row],
+        )
+        _assert_stage(
+            validate_storage_artifact,
+            mutated,
+            mutation.stage2,
+            resolution=resolution,
+            asset_type=asset_type,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -861,3 +958,128 @@ class TestStatisticalOutliers:
         returns = np.array([-0.001] * 49 + [0.0, 0.0] + [0.001] * 48 + [last_return])
         mask = _mask_for_returns(returns)
         assert _flagged_positions(mask) == expected
+
+
+# ---------------------------------------------------------------------------
+# INDEX_US context: populated zero-volume rows are observations
+# ---------------------------------------------------------------------------
+
+
+def _index_artifact() -> pd.DataFrame:
+    spec = _load_spec("cboe")
+    grid = _expected_frame(spec["artifact"], "artifact").index
+    return _prepare_ohlcv(
+        _normalise("cboe", _raw_input("cboe", spec)),
+        grid,
+        Resolution.ONE_DAY,
+        asset_type=AssetType.INDEX_US,
+    )
+
+
+class TestIndexContext:
+    """INDEX_US keeps every rule active with the index volume interpretation.
+
+    Existing traded-bar cases above deliberately run with ``asset_type=None``
+    and are unchanged; this class pins the index branch of the same registry.
+    """
+
+    def test_artifact_passes_both_stages(self) -> None:
+        frame = _index_artifact()
+        validate_raw_provider_data(
+            frame, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+        )
+        validate_storage_artifact(
+            frame, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+        )
+
+    def test_volume_positive_rejected_stage2(self) -> None:
+        frame = _index_artifact()
+        frame.iloc[0, frame.columns.get_loc("volume")] = 1.0
+        validate_raw_provider_data(
+            frame, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+        )
+        with pytest.raises(DataValidationError) as excinfo:
+            validate_storage_artifact(
+                frame, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+            )
+        assert excinfo.value.rule == "nan_semantics"
+
+    def test_missing_close_warns_stage1_and_rejects_stage2(self) -> None:
+        """A missing close is a partial observation for index data — found
+        without volume, and a Stage-2 corruption error."""
+        frame = _index_artifact()
+        frame.iloc[1, frame.columns.get_loc("close")] = np.nan
+        with capture_logs() as cap:
+            validate_raw_provider_data(
+                frame, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+            )
+        events = [e for e in cap if e["event"] == "validation.partial_ohlcv"]
+        assert len(events) == 1
+        assert events[0]["timestamp"] == frame.index[1]
+        with pytest.raises(DataValidationError) as excinfo:
+            validate_storage_artifact(
+                frame, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+            )
+        assert excinfo.value.rule == "nan_semantics"
+
+    def test_ohlcv_violation_checked_despite_zero_volume(self) -> None:
+        frame = _index_artifact()
+        frame.iloc[0, frame.columns.get_loc("high")] = 1.0  # high < close
+        with pytest.raises(SchemaValidationError) as excinfo:
+            validate_storage_artifact(
+                frame, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+            )
+        assert excinfo.value.rule == "ohlcv_violation"
+
+    def test_daily_zero_volume_spike_flags_audit_outlier(self) -> None:
+        """≥100 eligible zero-volume daily returns make the statistical rule
+        active for index data; advisory warnings never block the write."""
+        rng = np.random.default_rng(7)
+        closes = 20.0 * np.exp(
+            np.concatenate([[0.0], np.cumsum(rng.normal(0.0, 0.001, 150))])
+        )
+        closes[80] *= 10.0
+        index = pd.date_range("2023-01-02", periods=len(closes), freq="1D", tz="UTC")
+        frame = pd.DataFrame(
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": np.zeros(len(closes)),
+            },
+            index=index,
+        )
+        validate_storage_artifact(
+            frame, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+        )
+        report = check_integrity(
+            frame, frame.index, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+        )
+        issues = [i for i in report.issues if i.category == "statistical_outlier"]
+        assert len(issues) == 1
+        assert issues[0].severity == "warning"
+        assert issues[0].timestamp == frame.index[80]
+
+    def test_inserted_null_is_not_bridged_by_outlier_rule(self) -> None:
+        rng = np.random.default_rng(7)
+        closes = 20.0 * np.exp(
+            np.concatenate([[0.0], np.cumsum(rng.normal(0.0, 0.001, 150))])
+        )
+        closes[80] *= 10.0
+        index = pd.date_range("2023-01-02", periods=len(closes), freq="1D", tz="UTC")
+        frame = pd.DataFrame(
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": np.zeros(len(closes)),
+            },
+            index=index,
+        )
+        frame.iloc[80, frame.columns.get_loc("close")] = np.nan
+        report = check_integrity(
+            frame, frame.index, Resolution.ONE_DAY, asset_type=AssetType.INDEX_US
+        )
+        assert "statistical_outlier" not in report.summary

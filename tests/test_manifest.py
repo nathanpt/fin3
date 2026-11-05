@@ -593,3 +593,48 @@ libraries:
     assert ds.resolution is Resolution.ONE_MINUTE
     assert ds.calendar == "XNYS"
     assert ds.symbols == ("BRK B", "ES.n.0")  # case preserved
+
+
+INDEX_YAML = """
+version: 1
+id: vol-index
+libraries:
+  vix-daily:
+    asset_type: index_us
+    provider: cboe
+    resolution: 1d
+    symbols: [VIX, VIX3M]
+    start: '2023-11-01'
+    end: '2023-11-07'
+    update_policy: incremental
+"""
+
+
+class TestIndexUsDatasets:
+    """index_us resolves to the canonical indices library with XNYS default
+    calendar; non-daily indexes are rejected at load."""
+
+    def test_index_us_defaults_resolve(self, tmp_path: Path) -> None:
+        ds = load_manifest(_write(tmp_path, "v.yaml", INDEX_YAML), now=NOW).datasets[0]
+        assert ds.asset_type is AssetType.INDEX_US
+        assert ds.library == "indices-1d-cboe"
+        assert ds.calendar == "XNYS"
+        assert ds.resolution is Resolution.ONE_DAY
+        assert ds.symbols == ("VIX", "VIX3M")
+
+    def test_index_us_explicit_xnys_calendar_accepted(self, tmp_path: Path) -> None:
+        doc = INDEX_YAML.replace("resolution: 1d", "resolution: 1d\n    calendar: XNYS")
+        ds = load_manifest(_write(tmp_path, "v.yaml", doc), now=NOW).datasets[0]
+        assert ds.calendar == "XNYS"
+
+    def test_index_us_other_calendar_rejected(self, tmp_path: Path) -> None:
+        doc = INDEX_YAML.replace("resolution: 1d", "resolution: 1d\n    calendar: 24x7")
+        with pytest.raises(ConfigurationError, match="calendar"):
+            load_manifest(_write(tmp_path, "v.yaml", doc), now=NOW)
+
+    def test_index_us_non_daily_rejected(self, tmp_path: Path) -> None:
+        doc = INDEX_YAML.replace("resolution: 1d", "resolution: 1h")
+        with pytest.raises(
+            ConfigurationError, match="index_us supports only resolution 1d"
+        ):
+            load_manifest(_write(tmp_path, "v.yaml", doc), now=NOW)

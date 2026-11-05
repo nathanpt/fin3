@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -111,8 +111,32 @@ class YahooConfig(BaseModel):
     timeout: float = 30.0
 
 
+class CboeConfig(BaseModel):
+    """Cboe published index-CSV provider settings.
+
+    Serves daily **close levels** for the Cboe volatility indexes (``VIX``,
+    ``VIX3M``) from Cboe's full-history CSV endpoint — keyless and free to
+    retrieve. These are provider-source settings only; storage keeps using
+    ``ClientConfig.minio``. The source is consumed for personal,
+    non-commercial, non-redistributed research use under the published Cboe
+    website terms.
+    """
+
+    provider_type: Literal["cboe"] = "cboe"
+    base_url: str = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices"
+    timeout: float = Field(default=30.0, gt=0)
+    cache_ttl_seconds: float = Field(default=300.0, gt=0)
+
+    @field_validator("base_url")
+    @classmethod
+    def _base_url_nonempty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Cboe base_url must be nonempty")
+        return value.strip()
+
+
 ProviderConfig = Annotated[
-    DatabentoConfig | MassiveConfig | BinanceConfig | YahooConfig,
+    DatabentoConfig | MassiveConfig | BinanceConfig | YahooConfig | CboeConfig,
     Field(discriminator="provider_type"),
 ]
 """Discriminated union of all supported provider config models.

@@ -1,8 +1,16 @@
 """Tests for schemas: library_name, AssetType, Resolution, empty_ohlcv."""
 
+import numpy as np
 import pandas as pd
 
-from fin3.schemas import OHLCV_COLUMNS, AssetType, Resolution, empty_ohlcv, library_name
+from fin3.schemas import (
+    OHLCV_COLUMNS,
+    AssetType,
+    Resolution,
+    empty_ohlcv,
+    library_name,
+    observation_mask,
+)
 
 
 class TestLibraryName:
@@ -46,6 +54,73 @@ class TestAssetType:
 
     def test_mic_code_futures(self) -> None:
         assert AssetType.FUTURES.mic_code == "CME"
+
+    def test_mic_code_index_us(self) -> None:
+        """XNYS is an explicit equity-session alignment proxy for index
+        levels, not a claim that the index trades on NYSE."""
+        assert AssetType.INDEX_US.mic_code == "XNYS"
+
+    def test_index_us_library_name(self) -> None:
+        assert (
+            library_name(AssetType.INDEX_US, Resolution.ONE_DAY, "cboe")
+            == "indices-1d-cboe"
+        )
+
+    def test_index_us_daily_grid_on_session_open(self) -> None:
+        """Daily index grids reuse the XNYS session-open labels (14:30 UTC)
+        and skip non-sessions (2024-01-06/07 is a weekend)."""
+        grid = AssetType.INDEX_US.calendar_strategy.generate_grid(
+            pd.Timestamp("2024-01-02", tz="UTC"),
+            pd.Timestamp("2024-01-08", tz="UTC"),
+            Resolution.ONE_DAY,
+        )
+        assert list(grid) == [
+            pd.Timestamp("2024-01-02 14:30:00", tz="UTC"),
+            pd.Timestamp("2024-01-03 14:30:00", tz="UTC"),
+            pd.Timestamp("2024-01-04 14:30:00", tz="UTC"),
+            pd.Timestamp("2024-01-05 14:30:00", tz="UTC"),
+            pd.Timestamp("2024-01-08 14:30:00", tz="UTC"),
+        ]
+
+
+class TestObservationMask:
+    """The observation/padding distinction: index rows are observed when the
+    close is present (volume is legitimately 0); every other context keeps
+    the traded-volume convention."""
+
+    @staticmethod
+    def _frame() -> pd.DataFrame:
+        index = pd.DatetimeIndex(
+            ["2024-01-02T14:30:00Z", "2024-01-03T14:30:00Z", "2024-01-04T14:30:00Z"]
+        )
+        return pd.DataFrame(
+            {
+                "open": [20.0, 21.0, np.nan],
+                "high": [20.0, 21.0, np.nan],
+                "low": [20.0, 21.0, np.nan],
+                "close": [20.0, 21.0, np.nan],
+                "volume": [0.0, 0.0, 0.0],
+            },
+            index=index,
+        )
+
+    def test_index_context_uses_close_presence(self) -> None:
+        frame = self._frame()
+        mask = observation_mask(frame, asset_type=AssetType.INDEX_US)
+        assert mask.tolist() == [True, True, False]
+
+    def test_default_context_uses_positive_volume(self) -> None:
+        frame = self._frame()
+        assert observation_mask(frame).tolist() == [False, False, False]
+
+    def test_traded_rows_observed_by_volume(self) -> None:
+        frame = self._frame()
+        frame.iloc[2, frame.columns.get_loc("volume")] = 500.0
+        assert observation_mask(frame).tolist() == [False, False, True]
+
+    def test_empty_frame_yields_empty_mask(self) -> None:
+        mask = observation_mask(empty_ohlcv(), asset_type=AssetType.INDEX_US)
+        assert mask.tolist() == []
 
 
 class TestResolution:

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import structlog
 
-from fin3.schemas import Resolution
+from fin3.schemas import AssetType, Resolution
 from fin3.storage.arctic import ArcticStorage
 
 if TYPE_CHECKING:
@@ -84,6 +84,7 @@ def inspect_library(
     *,
     include_integrity: bool = False,
     calendar_strategy: CalendarStrategy | None = None,
+    asset_type: AssetType | None = None,
 ) -> LibraryOverview:
     """Inspect a library and return a per-symbol profile of stored data.
 
@@ -100,6 +101,10 @@ def inspect_library(
         Requires ``calendar_strategy`` to generate the expected grid.
     calendar_strategy : CalendarStrategy or None
         Required when ``include_integrity=True`` to build the expected grid.
+    asset_type : AssetType or None
+        Asset context; ``AssetType.INDEX_US`` counts null bars by missing
+        close (index observations legitimately carry volume 0) and passes
+        the context to integrity checks.
     """
     symbols = storage.list_symbols(library)
     if not symbols:
@@ -117,6 +122,7 @@ def inspect_library(
             storage, library, symbol, resolution,
             include_integrity=include_integrity,
             calendar_strategy=calendar_strategy,
+            asset_type=asset_type,
         )
         profiles.append(profile)
         logger.debug(
@@ -151,6 +157,7 @@ def _profile_symbol(
     *,
     include_integrity: bool,
     calendar_strategy: CalendarStrategy | None,
+    asset_type: AssetType | None = None,
 ) -> SymbolProfile:
     """Build a SymbolProfile for a single symbol."""
     if include_integrity and calendar_strategy is None:
@@ -158,8 +165,15 @@ def _profile_symbol(
             "calendar_strategy is required when include_integrity=True"
         )
 
-    # When integrity is not needed, only read volume + index to reduce I/O
-    columns: list[str] | None = None if include_integrity else ["volume"]
+    # When integrity is not needed, only read the minimum columns to reduce
+    # I/O. Index assets also need ``close``: their null bars are missing
+    # closes, not zero-volume rows (index volume is legitimately 0).
+    if include_integrity:
+        columns: list[str] | None = None
+    elif asset_type is AssetType.INDEX_US:
+        columns = ["volume", "close"]
+    else:
+        columns = ["volume"]
     df = storage.read(library, symbol, columns=columns)
     size_bytes = storage.get_symbol_size(library, symbol)
 
@@ -180,7 +194,10 @@ def _profile_symbol(
     last_bar = df.index[-1]
     total_bars = len(df)
     has_volume = "volume" in df.columns
-    null_bars = int((df["volume"] == 0).sum()) if has_volume else 0
+    if asset_type is AssetType.INDEX_US and "close" in df.columns:
+        null_bars = int(df["close"].isna().sum())
+    else:
+        null_bars = int((df["volume"] == 0).sum()) if has_volume else 0
     total_volume = float(df["volume"].sum()) if has_volume else 0.0
 
     issue_count = 0
@@ -194,7 +211,7 @@ def _profile_symbol(
                 "calendar_strategy is required when include_integrity=True"
             )
         grid = calendar_strategy.generate_grid(first_bar, last_bar, resolution)
-        report = check_integrity(df, grid, resolution)
+        report = check_integrity(df, grid, resolution, asset_type=asset_type)
         issue_count = len(report.issues)
         issues_summary = report.summary
 

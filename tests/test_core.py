@@ -6,7 +6,13 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from fin3.config.settings import ClientConfig, DatabentoConfig, LockConfig, MinioConfig
+from fin3.config.settings import (
+    CboeConfig,
+    ClientConfig,
+    DatabentoConfig,
+    LockConfig,
+    MinioConfig,
+)
 from fin3.core import MarketDataFetcher
 from fin3.exceptions import (
     ConfigurationError,
@@ -26,7 +32,7 @@ def _make_fetcher(storage: ArcticStorage) -> MarketDataFetcher:
     fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
     fetcher._config = ClientConfig(
         minio=MinioConfig(endpoint="unused", access_key="t", secret_key="t"),
-        providers={"databento": DatabentoConfig(api_key="test_key")},
+        providers={"databento": DatabentoConfig(api_key="test_key"), "cboe": CboeConfig()},
     )
     fetcher._storage = storage
     fetcher._providers = ProviderRegistry.__new__(ProviderRegistry)
@@ -842,3 +848,157 @@ class TestValueLevelRejection:
         assert stored_after is not None
         pd.testing.assert_frame_equal(stored_after, stored_before)
         assert lmdb_storage.arctic[lib].list_versions("BTC-USD") == versions_before
+
+
+def _index_bars(
+    dates: list[str], closes: list[float]
+) -> pd.DataFrame:
+    """Source-shaped index rows: UTC-midnight labels, close-only encoding."""
+    index = pd.DatetimeIndex([pd.Timestamp(d, tz="UTC") for d in dates])
+    return pd.DataFrame(
+        {
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "close": closes,
+            "volume": [0.0] * len(closes),
+        },
+        index=index,
+    )
+
+
+class TestIndexDataSemantics:
+    """Real get_data path for INDEX_US/1d through LMDB: XNYS session-open
+    labels, close-only encoding preserved, and idempotent reads."""
+
+    JAN_SESSIONS = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+    JAN_CLOSES = [14.91, 14.89, 14.81, 15.02]
+
+    @staticmethod
+    def _get(
+        fetcher: MarketDataFetcher,
+        start: datetime,
+        end: datetime,
+        symbols: list[str] | None = None,
+    ) -> pd.DataFrame:
+        return fetcher.get_data(
+            asset_type=AssetType.INDEX_US,
+            provider="cboe",
+            resolution=Resolution.ONE_DAY,
+            symbols=symbols if symbols is not None else ["VIX"],
+            start=start,
+            end=end,
+        )
+
+    @staticmethod
+    def _lib() -> str:
+        return library_name(AssetType.INDEX_US, Resolution.ONE_DAY, "cboe")
+
+    def _fetcher(self, storage: ArcticStorage) -> MarketDataFetcher:
+        fetcher = _make_fetcher(storage)
+        mock_provider = _mock_provider()
+        calls: list[tuple[str, datetime, datetime]] = []
+
+        def fetch(symbol, start, end, resolution, *, asset_type=None, **kw):
+            calls.append((symbol, pd.Timestamp(start), pd.Timestamp(end)))
+            wanted = [d for d in self.JAN_SESSIONS if pd.Timestamp(start) <= pd.Timestamp(d, tz="UTC") <= pd.Timestamp(end)]
+            closes = [self.JAN_CLOSES[self.JAN_SESSIONS.index(d)] for d in wanted]
+            return _index_bars(wanted, closes)
+
+        mock_provider.fetch = fetch
+        mock_provider.calls = calls
+        fetcher._providers._providers = {"cboe": mock_provider}
+        return fetcher
+
+    def test_readback_preserves_closes_and_zero_volume(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Closes and zero volume survive the store round-trip; rows land on
+        XNYS session-open labels (14:30 UTC)."""
+        fetcher = self._fetcher(lmdb_storage)
+        result = self._get(
+            fetcher,
+            datetime(2024, 1, 2, tzinfo=timezone.utc),
+            datetime(2024, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        )
+        assert list(result.columns) == [("VIX", c) for c in OHLCV_COLUMNS]
+        assert [t.isoformat() for t in result.index] == [
+            "2024-01-02T14:30:00+00:00",
+            "2024-01-03T14:30:00+00:00",
+            "2024-01-04T14:30:00+00:00",
+            "2024-01-05T14:30:00+00:00",
+        ]
+        assert result[("VIX", "close")].tolist() == self.JAN_CLOSES
+        assert result[("VIX", "volume")].eq(0.0).all()
+
+        stored = lmdb_storage.read(self._lib(), "VIX")
+        assert stored is not None
+        assert list(stored.columns) == list(OHLCV_COLUMNS)
+        assert stored["close"].tolist() == self.JAN_CLOSES
+        assert stored["volume"].eq(0.0).all()
+        assert (stored["open"] == stored["close"]).all()
+
+    def test_repeated_call_neither_fetches_nor_writes_a_version(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        args = (
+            datetime(2024, 1, 2, tzinfo=timezone.utc),
+            datetime(2024, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        )
+        fetcher = self._fetcher(lmdb_storage)
+        first = self._get(fetcher, *args)
+        calls_after_first = len(fetcher._providers._providers["cboe"].calls)
+        versions_after_first = len(
+            lmdb_storage.arctic[self._lib()].list_versions("VIX")
+        )
+
+        second = self._get(fetcher, *args)
+
+        pd.testing.assert_frame_equal(first, second)
+        assert len(fetcher._providers._providers["cboe"].calls) == calls_after_first
+        assert (
+            len(lmdb_storage.arctic[self._lib()].list_versions("VIX"))
+            == versions_after_first
+        )
+
+    def test_later_date_extends_coverage_with_one_new_fetch(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        fetcher = self._fetcher(lmdb_storage)
+        self._get(
+            fetcher,
+            datetime(2024, 1, 2, tzinfo=timezone.utc),
+            datetime(2024, 1, 3, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        )
+        calls_after_first = len(fetcher._providers._providers["cboe"].calls)
+
+        self._get(
+            fetcher,
+            datetime(2024, 1, 2, tzinfo=timezone.utc),
+            datetime(2024, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        )
+
+        provider = fetcher._providers._providers["cboe"]
+        assert len(provider.calls) == calls_after_first + 1
+        fetched_start, fetched_end = provider.calls[-1][1], provider.calls[-1][2]
+        assert fetched_start == pd.Timestamp("2024-01-04", tz="UTC")
+        assert fetched_end == pd.Timestamp(
+            "2024-01-05T23:59:59.999999", tz="UTC"
+        )
+        stored = lmdb_storage.read(self._lib(), "VIX")
+        assert len(stored) == 4
+        assert stored["close"].tolist() == self.JAN_CLOSES
+
+    def test_non_daily_index_rejected_before_any_fetch(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        fetcher = self._fetcher(lmdb_storage)
+        with pytest.raises(ValueError, match="index_us supports only resolution 1d"):
+            fetcher.get_data(
+                asset_type=AssetType.INDEX_US,
+                provider="cboe",
+                resolution=Resolution.ONE_HOUR,
+                symbols=["VIX"],
+                start=datetime(2024, 1, 2, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 3, tzinfo=timezone.utc),
+            )

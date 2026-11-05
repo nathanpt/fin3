@@ -34,7 +34,13 @@ from fin3.providers import ProviderRegistry
 from fin3.providers.databento import DatabentoProvider
 from fin3.storage.arctic import ArcticStorage
 
-pytestmark = pytest.mark.integration
+# The subprocess workers below bypass the session config fixtures, so the
+# module pins its real prerequisites (MinIO + Databento key) as marks: an
+# absent prerequisite skips the whole module explicitly.
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.usefixtures("minio_config", "databento_config"),
+]
 
 WINDOW_START = "2024-06-03T13:30:00Z"
 WINDOW_END = "2024-06-03T13:35:59Z"

@@ -19,14 +19,15 @@ from fin3.config.settings import BinanceConfig, ClientConfig, LockConfig, MinioC
 from fin3.exceptions import (
     ConfigurationError,
     CostLimitExceededError,
+    DataValidationError,
     ProviderError,
     StorageError,
 )
-from fin3.manifest import load_manifest
+from fin3.manifest import ResolvedDataset, UpdatePolicy, load_manifest
 from fin3.providers import ProviderRegistry
-from fin3.schemas import METADATA_LIBRARY
+from fin3.schemas import AssetType, METADATA_LIBRARY, OHLCV_COLUMNS, Resolution
 from fin3.storage.arctic import ArcticStorage
-from fin3.sync import ManifestRunner
+from fin3.sync import ManifestRunner, _ActiveChunk, _SymbolPlan
 from tests.conftest import make_ohlcv
 
 NOW = datetime(2024, 1, 2, 1, 0, tzinfo=timezone.utc)
@@ -1064,3 +1065,224 @@ libraries:
             crypto_manifest(tmp_path, "st2", symbol="ETH-USD"), now=NOW
         )
         assert runner.status(second).definition_state == "changed"
+
+
+# ---------------------------------------------------------------------------
+# INDEX_US sync scenarios
+# ---------------------------------------------------------------------------
+
+INDEX_LIB = "indices-1d-manifest-test"
+NOW_INDEX = datetime(2024, 1, 8, 12, 0, tzinfo=timezone.utc)
+INDEX_DATES = ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+INDEX_CLOSES = [14.91, 14.89, 14.81, 15.02]
+
+
+def index_manifest(
+    tmp_path: Path,
+    manifest_id: str = "vix",
+    *,
+    symbol: str = "VIX",
+    start: str = "2024-01-02",
+    end: str = "2024-01-05T23:59:59Z",
+    policy: str = "incremental",
+    provider: str = "manifest-test",
+    resolution: str = "1d",
+) -> Path:
+    return write_manifest(
+        tmp_path,
+        manifest_id,
+        f"""
+version: 1
+id: {manifest_id}
+libraries:
+  ds1:
+    asset_type: index_us
+    provider: {provider}
+    resolution: {resolution}
+    symbols: [{symbol}]
+    start: '{start}'
+    end: {end}
+    update_policy: {policy}
+""",
+    )
+
+
+def index_bars(dates: list[str], closes: list[float]) -> pd.DataFrame:
+    """Source-shaped index rows: UTC-midnight labels, close-only encoding."""
+    tz_index = pd.DatetimeIndex([pd.Timestamp(d, tz="UTC") for d in dates])
+    frame = pd.DataFrame(
+        {
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "close": closes,
+            "volume": [0.0] * len(closes),
+        },
+        index=tz_index,
+    )
+    frame.index.name = None
+    return frame
+
+
+def register_index_provider(
+    monkeypatch,
+    dates: list[str],
+    closes: list[float],
+    name: str = "manifest-test",
+) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
+    """Stub provider serving zero-volume index rows for requested spans."""
+    calls: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+
+    class StubIndexProvider:
+        def __init__(self, config: object) -> None:
+            pass
+
+        def fetch(self, symbol, start, end, resolution, *, asset_type=None, **kw):
+            calls.append((symbol, pd.Timestamp(start), pd.Timestamp(end)))
+            span_start, span_end = pd.Timestamp(start), pd.Timestamp(end)
+            wanted = [
+                d for d in dates if span_start <= pd.Timestamp(d, tz="UTC") <= span_end
+            ]
+            return index_bars(
+                wanted, [closes[dates.index(d)] for d in wanted]
+            )
+
+    monkeypatch.setitem(ProviderRegistry._PROVIDER_MAP, name, StubIndexProvider)
+    return calls
+
+
+class TestIndexSync:
+    def test_sync_persists_observed_zero_volume_rows(
+        self, tmp_path, runner, storage, monkeypatch
+    ) -> None:
+        register_index_provider(monkeypatch, INDEX_DATES, INDEX_CLOSES)
+        manifest = load_manifest(index_manifest(tmp_path, "ix"), now=NOW_INDEX)
+        dataset = manifest.datasets[0]
+        assert dataset.library == INDEX_LIB
+        assert dataset.calendar == "XNYS"
+
+        report = runner.sync(manifest)
+        result = report.results[0]
+        assert result.status == "created"
+
+        stored = storage.read(INDEX_LIB, "VIX")
+        assert list(stored.columns) == list(OHLCV_COLUMNS)
+        assert stored["close"].tolist() == INDEX_CLOSES
+        assert stored["volume"].eq(0.0).all()
+        assert [t.isoformat() for t in stored.index] == [
+            f"{d}T14:30:00+00:00" for d in INDEX_DATES
+        ]
+
+    def test_index_non_daily_manifest_rejected(self, tmp_path) -> None:
+        with pytest.raises(
+            ConfigurationError, match="index_us supports only resolution 1d"
+        ):
+            load_manifest(
+                index_manifest(tmp_path, "ixh", resolution="1h"), now=NOW_INDEX
+            )
+
+    def test_failed_full_refresh_cannot_regress_close_to_padding(
+        self, tmp_path, runner, storage, monkeypatch
+    ) -> None:
+        """A partial provider response during full-refresh must fail the run
+        and leave every stored index close intact — no padding commit."""
+        register_index_provider(monkeypatch, INDEX_DATES, INDEX_CLOSES)
+        runner.sync(load_manifest(index_manifest(tmp_path, "seed"), now=NOW_INDEX))
+        assert storage.read(INDEX_LIB, "VIX") is not None
+
+        # Refresh now serves only the first session. A fresh runner mirrors a
+        # new process: the provider cache must not resurrect the old stub.
+        register_index_provider(monkeypatch, INDEX_DATES[:1], INDEX_CLOSES[:1])
+        refresh_config = ClientConfig(
+            minio=MinioConfig(endpoint="lmdb", access_key="", secret_key=""),
+            providers={"manifest-test": BinanceConfig(api_key="secret-key-value")},
+        )
+        fresh_runner = ManifestRunner(refresh_config, storage=storage)
+        report = fresh_runner.sync(
+            load_manifest(
+                index_manifest(tmp_path, "rf", policy="full-refresh"), now=NOW_INDEX
+            )
+        )
+        result = report.results[0]
+        assert result.status == "failed"
+        assert result.error is not None
+
+        stored = storage.read(INDEX_LIB, "VIX")
+        assert len(stored) == 4
+        assert stored["close"].tolist() == INDEX_CLOSES
+
+    def test_refresh_guard_rejects_index_observation_overwrite(
+        self, tmp_path, runner, storage, monkeypatch
+    ) -> None:
+        """Direct chunk proof: inside one refresh chunk, a partially-covered
+        provider response may not replace existing index closes with padding.
+        The rejection happens before any write."""
+        stamps = pd.DatetimeIndex(
+            [pd.Timestamp(f"{d}T14:30:00Z") for d in INDEX_DATES]
+        )
+        seed = pd.DataFrame(
+            {
+                "open": INDEX_CLOSES,
+                "high": INDEX_CLOSES,
+                "low": INDEX_CLOSES,
+                "close": INDEX_CLOSES,
+                "volume": [0.0] * 4,
+            },
+            index=stamps,
+        )
+        seed.index.name = None
+        storage.ensure_library(INDEX_LIB)
+        storage.write(INDEX_LIB, "VIX", seed)
+        versions_before = len(storage.arctic[INDEX_LIB].list_versions("VIX"))
+
+        dataset = ResolvedDataset(
+            dataset_id="ds1",
+            library=INDEX_LIB,
+            asset_type=AssetType.INDEX_US,
+            provider="manifest-test",
+            resolution=Resolution.ONE_DAY,
+            calendar="XNYS",
+            symbols=("VIX",),
+            start=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc),
+            declared_end=datetime(2024, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc),
+            end_is_now=False,
+            update_policy=UpdatePolicy.FULL_REFRESH,
+        )
+        plan = _SymbolPlan(
+            dataset=dataset,
+            symbol="VIX",
+            library_exists=True,
+            symbol_exists=True,
+            action="refresh",
+            skip_reason=None,
+            chunks=[
+                _ActiveChunk(
+                    stamps=stamps,
+                    write_stamps=stamps,
+                    fetch_start=datetime(2024, 1, 2, tzinfo=timezone.utc),
+                    fetch_end=datetime(
+                        2024, 1, 5, 23, 59, 59, 999999, tzinfo=timezone.utc
+                    ),
+                )
+            ],
+        )
+
+        class PartialIndexProvider:
+            def fetch(self, symbol, start, end, resolution, *, asset_type=None, **kw):
+                return index_bars(INDEX_DATES[:1], INDEX_CLOSES[:1])
+
+        with pytest.raises(DataValidationError, match="refresh would replace index observation"):
+            runner._execute_chunk(
+                plan,
+                plan.chunks[0],
+                PartialIndexProvider(),
+                new_symbol=False,
+                committed_any=False,
+            )
+        # Rejected before any write: frame and version count unchanged.
+        stored = storage.read(INDEX_LIB, "VIX")
+        pd.testing.assert_frame_equal(stored, seed, check_freq=False)
+        assert (
+            len(storage.arctic[INDEX_LIB].list_versions("VIX")) == versions_before
+        )
