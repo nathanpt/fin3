@@ -814,8 +814,12 @@ class TestRequestBudget:
         provider = make_provider(monkeypatch, simulator, cap=3)
         with pytest.raises(RequestLimitExceededError) as excinfo:
             provider.fetch_history("SHY", START, END)
-        assert "per-run request limit exhausted" in str(excinfo.value)
-        assert excinfo.value.requests_used == 3
+        # discovery + guard + enumeration page 0 (2 rows seen); the two
+        # seen rows each imply a future history request, so the lower
+        # bound fires at 3 + 2 = 5 > 3 instead of burning the cap on
+        # further enumeration pages.
+        assert "needs at least 5 requests; cap 3" in str(excinfo.value)
+        assert excinfo.value.requests_used == 5
         assert excinfo.value.max_requests == 3
         assert len(simulator.calls) == 3  # discovery + guard + enum page 0
 
@@ -830,6 +834,77 @@ class TestRequestBudget:
         # for the three EOD histories: 4 + 3 = 7 > 5.
         assert "needs at least 7 requests; cap 5" in str(excinfo.value)
         assert excinfo.value.requests_used == 7
+
+    def test_wide_root_fails_fast_with_lower_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: finlab options-feed-backfill-problem (2026-11-07).
+
+        A root whose very first enumeration page already implies more
+        history requests than the whole cap allows must fail at the first
+        page with the lower bound, not burn the entire cap walking
+        reference pages (AAPL one-day shape).
+        """
+        refs = [
+            ref_row(f"SHY261120{right}{strike:08d}")
+            for right in "CP"
+            for strike in range(50, 90)
+        ]
+        simulator = SourceSimulator(refs, {})
+        provider = make_provider(monkeypatch, simulator, page_size=10, cap=5)
+        with pytest.raises(RequestLimitExceededError) as excinfo:
+            provider.fetch_history("SHY", START, END)
+        # discovery + guard + page 0 (10 rows seen): 3 + 10 = 13 > 5.
+        assert "needs at least 13 requests; cap 5" in str(excinfo.value)
+        assert excinfo.value.requests_used == 13
+        assert len(simulator.calls) == 3
+
+    def test_budget_error_not_ceiling_during_partition_recursion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: finlab options-feed-backfill-problem (2026-11-07).
+
+        A ceiling hit inside the partition cascade must never surface as
+        the internal ceiling exception. When budget exhaustion happens in
+        a nested enumeration call that is *handling* such a ceiling, the
+        terminal shows the ceiling as chained traceback context (which can
+        read like "nested retries"); the raised class is the budget error.
+        """
+        import fin3.providers.eodhd_options as module
+
+        # Three expirations x call/put: with the ceiling at one page, the
+        # partition cascade needs >10 requests, so the budget exhausts
+        # mid-recursion (before any per-contract history).
+        refs = [
+            ref_row("SHY261120C00091000"),
+            ref_row("SHY261120P00096000"),
+            ref_row("SHY261127C00092000"),
+            ref_row("SHY261127P00097000"),
+            ref_row("SHY270116C00098000"),
+            ref_row("SHY270116P00099000"),
+        ]
+        simulator = SourceSimulator(refs, {})
+        monkeypatch.setattr(module, "_OFFSET_CEILING", 1)
+        provider = make_provider(monkeypatch, simulator, cap=10)
+        with pytest.raises(RequestLimitExceededError) as excinfo:
+            provider.fetch_history("SHY", START, END)
+        assert type(excinfo.value) is RequestLimitExceededError
+        assert len(simulator.calls) <= 10
+
+    def test_contract_scope_reserves_selection_before_http(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        simulator, _, _ = standard_universe()
+        provider = make_provider(monkeypatch, simulator, cap=2)
+        selection = [
+            "SHY261120C00091000",
+            "SHY261120P00096000",
+            "SHY261127C00092000",
+        ]
+        with pytest.raises(RequestLimitExceededError) as excinfo:
+            provider.fetch_history("SHY", START, END, contracts=selection)
+        assert "needs at least 3 requests; cap 2" in str(excinfo.value)
+        assert len(simulator.calls) == 0
 
     def test_pacing_uses_monotonic_clock(
         self, monkeypatch: pytest.MonkeyPatch

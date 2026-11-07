@@ -374,6 +374,7 @@ class EodhdOptionsProvider(ChainProvider):
         row_validator: Callable[[dict[str, Any]], None],
         limit: int | None = None,
         single_page: bool = False,
+        on_page: Callable[[int], None] | None = None,
     ) -> list[dict[str, Any]]:
         """Run one documented paged query and return all its rows.
 
@@ -384,7 +385,10 @@ class EodhdOptionsProvider(ChainProvider):
         would exceed offset 10,000 raises ``_QueryCeiling`` before that
         request is made. ``single_page`` (used by the one-page maximum
         expiration discovery and its guard query) returns the first page
-        without following ``links.next``.
+        without following ``links.next``. When *on_page* is given it is
+        called with each page's row count as soon as that page has been
+        fetched, so callers can fail fast on budget lower bounds that the
+        already-seen rows imply.
         """
         page_limit = self._page_size if limit is None else limit
         sent = dict(params)
@@ -432,6 +436,8 @@ class EodhdOptionsProvider(ChainProvider):
                         raise ProviderError("EODHD continuation link is not a string")
                     next_link = raw_next
             rows.extend(data)
+            if on_page is not None:
+                on_page(len(data))
             if single_page or next_link is None:
                 return rows
             short_page = len(data) < page_limit
@@ -555,6 +561,28 @@ class EodhdOptionsProvider(ChainProvider):
 
     # -- reference extraction ---------------------------------------------
 
+    @staticmethod
+    def _enumeration_page_reserve(
+        budget: _RequestBudget,
+    ) -> Callable[[int], None]:
+        """Build a per-page lower-bound reserve for one reference query.
+
+        Every enumerated reference row implies at least one future
+        per-contract history request, so once the rows seen so far plus the
+        requests already spent exceed the cap, the run cannot complete and
+        must stop before burning further requests on enumeration. Rows from
+        a walk later discarded by a ceiling split remain valid evidence:
+        partitioning re-finds the same contracts.
+        """
+        seen = 0
+
+        def note(count: int) -> None:
+            nonlocal seen
+            seen += count
+            budget.reserve(seen)
+
+        return note
+
     def _discover_max_expiration(
         self, root: str, start: date, budget: _RequestBudget
     ) -> tuple[date | None, str | None]:
@@ -624,6 +652,7 @@ class EodhdOptionsProvider(ChainProvider):
                 budget=budget,
                 compact=False,
                 row_validator=self._reference_row_validator(dict(params)),
+                on_page=self._enumeration_page_reserve(budget),
             )
         except _QueryCeiling:
             if low == high:
@@ -655,6 +684,7 @@ class EodhdOptionsProvider(ChainProvider):
                     budget=budget,
                     compact=False,
                     row_validator=self._reference_row_validator(dict(params)),
+                    on_page=self._enumeration_page_reserve(budget),
                 )
             except _QueryCeiling:
                 self._collect_strike_partition(
@@ -691,6 +721,7 @@ class EodhdOptionsProvider(ChainProvider):
                 budget=budget,
                 compact=False,
                 row_validator=self._reference_row_validator(dict(params)),
+                on_page=self._enumeration_page_reserve(budget),
             )
         except _QueryCeiling:
             if low == high:
@@ -905,6 +936,10 @@ class EodhdOptionsProvider(ChainProvider):
     ) -> pd.DataFrame:
         references: list[_Reference] = []
         skipped_expired: list[str] = []
+        # Every selected contract needs at least one reference-verification
+        # request, so a cap below the selection size must fail before any
+        # HTTP rather than after partially verifying.
+        budget.reserve(len(selection))
         for contract in selection:
             reference = self._verify_contract_reference(contract, root, budget)
             references.append(reference)

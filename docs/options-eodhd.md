@@ -114,6 +114,34 @@ source is unverified.
   then right, then strike range — never truncated. A single contract
   history exceeding the ceiling fails explicitly.
 
+### Request budget economics
+
+Root-scope cost is proportional to the number of **reference contracts
+with `exp_date >= start`**, not to the window length: a complete as-of
+chain for one day must include far-dated contracts (a LEAPS contract
+expiring in 2028 trades on 2025-06-10), so a one-day window backfill
+costs essentially the same as a long window for the same root. The
+budget is spent as: discovery + guard (2 requests) + reference
+enumeration (at least one page per 1,000 candidates, plus re-fetches
+where the source ceiling forces filter partitioning) + at least one
+history request per enumerated contract.
+
+Because the source exposes no total-count metadata, fin3 cannot know
+the full requirement up front. It fails fast instead: once reference
+rows already seen plus requests already spent exceed the cap, the run
+raises `RequestLimitExceededError` with the observed lower bound
+(`EODHD run needs at least N requests; cap M`) after roughly three
+requests. In contract scope, a selection larger than the cap fails
+before any HTTP. Raise the cap to at least the reported bound (and
+expect the true root-wide total to be higher), or pass an explicit
+`contracts` selection for a bounded pull. Observed scale (live, 2026-11-07):
+one root-day for a mid-sized ETF root was 416 contracts ≈ 419 requests,
+while AAPL for one day enumerated 21,704 reference contracts (expirations
+2025-06-10…2029-01-19, ceiling-partitioned across 58 enumeration requests)
+→ a full one-day root backfill needs at least ~21,762 requests. Budget
+accordingly; the provider states each root's observed lower bound after
+~3 requests.
+
 ## No-data results
 
 `read_chain` returns `empty_chain_frame()` plus a reason, never invented
