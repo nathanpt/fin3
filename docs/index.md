@@ -1,7 +1,7 @@
 # fin3
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue)](https://github.com/nathanpt/fin3)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/nathanpt/fin3)
 [![Docs](https://github.com/nathanpt/fin3/actions/workflows/docs.yml/badge.svg)](https://github.com/nathanpt/fin3/actions/workflows/docs.yml)
 
 **Declarative financial time-series data** — fetch, store, validate, and retrieve
