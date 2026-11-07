@@ -111,6 +111,10 @@ fetcher = MarketDataFetcher(config)
 
 ## Fetching Data
 
+`start`/`end` accept `datetime.date` (normalized to UTC midnight) or
+`datetime.datetime` (naive treated as UTC, aware converted to UTC). ISO
+strings are deliberately not parsed — pass real date/datetime objects.
+
 ### Single symbol, single day
 
 ```python
@@ -342,6 +346,28 @@ Key behaviors:
 - **Incremental**: if you already have Jan–Mar and request Jan–Jun, only Apr–Jun is fetched
 - **Calendar-aware**: equity/futures gaps are detected per trading day; crypto gaps per hour
 - **Validated**: two-stage validation catches structural issues (duplicates, bad OHLCV constraints, NaN where there shouldn't be)
+
+### Lifecycle metadata (IPO/delist dates)
+
+Per symbol, `get_data` bootstraps lifecycle bounds into the
+`fin3-metadata` library: cached value → provider bounds API → discovery
+fetch. A discovery-derived `ipo_date` is persisted **only** when the
+provider's first observation falls strictly inside the requested window
+(a genuine mid-window listing). A first observation on the window's
+first expected bar proves nothing about listing — the symbol may simply
+extend earlier — so no bound is persisted in that case. Bounds affect
+gap detection: requests starting before the cached IPO date are clamped
+forward to it.
+
+If a cached value is wrong (e.g. written by an older fin3 version that
+persisted window-aligned first observations), clear it so the next call
+re-bootstraps:
+
+```python
+from fin3.metadata.asset_profile import MetadataStore
+
+MetadataStore(storage).invalidate("SHY")
+```
 
 ## Declarative Manifests (`fin3 ensure` / `fin3 sync` / `fin3 status`)
 

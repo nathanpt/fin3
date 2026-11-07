@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import structlog
@@ -51,8 +51,8 @@ class MarketDataFetcher:
         provider: str,
         resolution: Resolution,
         symbols: list[str],
-        start: datetime,
-        end: datetime,
+        start: datetime | date,
+        end: datetime | date,
         *,
         max_cost: float | None = None,
         defrag: bool = False,
@@ -63,6 +63,11 @@ class MarketDataFetcher:
         Returns a wide-format DataFrame with ``(symbol, field)`` MultiIndex
         columns and a single aligned UTC DatetimeIndex.
 
+        ``start``/``end`` accept ``datetime.date`` (normalized to UTC
+        midnight) or ``datetime.datetime`` (naive treated as UTC, aware
+        converted to UTC); every downstream comparison, storage read, and
+        provider call sees the normalized aware UTC values.
+
         Parameters
         ----------
         max_cost : float or None
@@ -72,6 +77,8 @@ class MarketDataFetcher:
             If True, defragment all symbols in the library after gap-filling.
             Useful after bulk operations that create many small segments.
         """
+        start = _as_utc_datetime(start, "start")
+        end = _as_utc_datetime(end, "end")
         _validate_inputs(asset_type, provider, resolution, symbols, start, end)
 
         lib_name = library_name(asset_type, resolution, provider)
@@ -195,8 +202,9 @@ class MarketDataFetcher:
         end: datetime,
     ) -> list[tuple[datetime, datetime]]:
         """Compute gaps for *symbol* after IPO/delist clamping."""
+        strategy = asset_type.calendar_strategy
         ipo_date, delist_date = self._metadata.bootstrap_metadata(
-            symbol, provider, start, end, resolution=resolution
+            symbol, provider, start, end, resolution=resolution, calendar=strategy,
         )
 
         eff_start, eff_end = start, end
@@ -415,6 +423,24 @@ def _prepare_ohlcv(
     _assert_boundary(reindexed, grid)
 
     return reindexed
+
+
+def _as_utc_datetime(value: object, name: str) -> datetime:
+    """Normalize a caller-supplied range endpoint to an aware UTC datetime.
+
+    Accepts ``datetime.date`` (→ UTC midnight) and ``datetime.datetime``
+    (naive → UTC, aware → converted to UTC). Anything else — including ISO
+    strings, which ``get_data`` deliberately does not parse — raises
+    ``TypeError`` naming the argument.
+    """
+    if isinstance(value, datetime):
+        return ensure_utc(value).to_pydatetime()
+    if isinstance(value, date):
+        return ensure_utc(pd.Timestamp(value)).to_pydatetime()
+    raise TypeError(
+        f"{name} must be a datetime.date or datetime.datetime, "
+        f"got {type(value).__name__}"
+    )
 
 
 def _validate_inputs(

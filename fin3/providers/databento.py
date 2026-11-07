@@ -219,7 +219,9 @@ class DatabentoProvider(DataProvider):
         Returns ``delist_date`` when available. Does not return ``ipo_date``
         because definition ``ts_event`` is the record timestamp, not the
         listing date — using it would incorrectly truncate the download range.
-        The discovery fallback in ``bootstrap_metadata`` handles IPO detection.
+        The discovery fallback in ``bootstrap_metadata`` may detect an IPO
+        when a fetch's first observation falls strictly inside the requested
+        window; window-aligned first observations are recorded as unknown.
         """
         return {"ipo_date": None, "delist_date": None}
 

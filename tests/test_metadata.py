@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 
+from fin3.calendar.exchange import ExchangeCalendarStrategy
 from fin3.metadata.asset_profile import METADATA_SYMBOL_PREFIX, MetadataStore
 from fin3.schemas import METADATA_LIBRARY, Resolution
 from fin3.storage.arctic import ArcticStorage
@@ -113,7 +114,6 @@ class TestBootstrapMetadata:
         provider = MagicMock()
         provider.get_instrument_bounds.side_effect = Exception("ref failed")
         provider.fetch.side_effect = Exception("fetch failed")
-
         ipo, _ = store.bootstrap_metadata(
             "BADDATA", provider,
             datetime(2024, 1, 1, tzinfo=timezone.utc),
@@ -175,3 +175,118 @@ class TestCorruptCachePinnedBehaviour:
         assert (ipo2, delist2) == (None, None)
         provider.get_instrument_bounds.assert_not_called()
         provider.fetch.assert_not_called()
+
+
+class TestDiscoveryPersistenceGuard:
+    """Regression: GitHub issue #6 — discovery must not persist a
+    window-start observation as the symbol's IPO date."""
+
+    def test_window_aligned_first_bar_not_persisted(
+        self, storage: ArcticStorage
+    ) -> None:
+        """A first observation on the window's first bar proves nothing
+        about listing (SHY 2025-06-09 case); it is stored as unknown and
+        the cache still short-circuits later calls."""
+        store = MetadataStore(storage)
+        provider = MagicMock()
+        provider.get_instrument_bounds.return_value = {
+            "ipo_date": None,
+            "delist_date": None,
+        }
+        provider.fetch.return_value = make_ohlcv("2025-06-09", periods=11, freq="1D")
+
+        ipo, _ = store.bootstrap_metadata(
+            "SHY", provider,
+            datetime(2025, 6, 9, tzinfo=timezone.utc),
+            datetime(2025, 6, 23, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
+        )
+        assert ipo is None
+        cached = store.get_lifecycle_bounds("SHY")
+        assert cached is not None
+        assert cached["ipo_date"] is None
+        # Second bootstrap is a cache hit: no re-discovery fetch.
+        ipo2, _ = store.bootstrap_metadata(
+            "SHY", provider,
+            datetime(2025, 6, 9, tzinfo=timezone.utc),
+            datetime(2025, 6, 23, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
+        )
+        assert ipo2 is None
+        provider.fetch.assert_called_once()
+
+    def test_mid_window_first_bar_persisted(
+        self, storage: ArcticStorage
+    ) -> None:
+        """A first observation strictly after the window's first expected
+        session is a genuine mid-window listing and stays persisted."""
+        store = MetadataStore(storage)
+        provider = MagicMock()
+        provider.get_instrument_bounds.side_effect = Exception("ref failed")
+        provider.fetch.return_value = make_ohlcv("2024-01-04", periods=3, freq="1D")
+        ipo, _ = store.bootstrap_metadata(
+            "NEWIPO", provider,
+            datetime(2024, 1, 1, tzinfo=timezone.utc),
+            datetime(2024, 1, 10, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
+            calendar=ExchangeCalendarStrategy("XNYS"),
+        )
+        # Jan 1 is an XNYS holiday: first expected session is Jan 2, so a
+        # first bar on Jan 4 is strictly inside the window.
+        assert ipo == datetime(2024, 1, 4, tzinfo=timezone.utc)
+
+    def test_weekend_window_aligned_persists_none(
+        self, storage: ArcticStorage
+    ) -> None:
+        """Non-session window start: the first observation lands on the
+        next session, which must compare against the session — not the
+        raw start — so the value stays unknown."""
+        store = MetadataStore(storage)
+        provider = MagicMock()
+        provider.get_instrument_bounds.return_value = {
+            "ipo_date": None,
+            "delist_date": None,
+        }
+        provider.fetch.return_value = make_ohlcv("2025-06-09", periods=11, freq="1D")
+        ipo, _ = store.bootstrap_metadata(
+            "SATWK", provider,
+            datetime(2025, 6, 7, tzinfo=timezone.utc),  # Saturday
+            datetime(2025, 6, 23, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
+            calendar=ExchangeCalendarStrategy("XNYS"),
+        )
+        assert ipo is None
+
+    def test_invalidate_clears_cache_and_rebootstraps(
+        self, storage: ArcticStorage
+    ) -> None:
+        """The repair path for poisoned metadata: invalidate drops the
+        cached entry and the next bootstrap re-runs discovery."""
+        store = MetadataStore(storage)
+        store.set_lifecycle_bounds(
+            "POISON", datetime(2025, 6, 9, tzinfo=timezone.utc), None
+        )
+        assert store.get_lifecycle_bounds("POISON") is not None
+
+        store.invalidate("POISON")
+        assert store.get_lifecycle_bounds("POISON") is None
+
+        provider = MagicMock()
+        provider.get_instrument_bounds.return_value = {
+            "ipo_date": None,
+            "delist_date": None,
+        }
+        provider.fetch.return_value = make_ohlcv("2025-06-09", periods=5, freq="1D")
+        ipo, _ = store.bootstrap_metadata(
+            "POISON", provider,
+            datetime(2025, 6, 9, tzinfo=timezone.utc),
+            datetime(2025, 6, 23, tzinfo=timezone.utc),
+            resolution=Resolution.ONE_DAY,
+        )
+        assert ipo is None
+        provider.fetch.assert_called_once()
+
+    def test_invalidate_unknown_symbol_is_noop(self, storage: ArcticStorage) -> None:
+        store = MetadataStore(storage)
+        store.invalidate("NEVERKNOWN")  # must not raise
+        assert store.get_lifecycle_bounds("NEVERKNOWN") is None

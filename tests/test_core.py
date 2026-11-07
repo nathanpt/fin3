@@ -1,6 +1,6 @@
 """End-to-end tests for MarketDataFetcher."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -114,6 +114,87 @@ class TestMarketDataFetcherE2E:
                     start=datetime(2024, 1, 1, tzinfo=timezone.utc),
                     end=datetime(2024, 1, 2, tzinfo=timezone.utc),
                 )
+
+    def test_get_data_accepts_date_objects_with_tz_aware_metadata(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Regression: GitHub issue #7 — a tz-aware cached ipo_date crashed
+        ``get_data`` called with ``datetime.date`` arguments
+        (TypeError: can't compare datetime.datetime to datetime.date).
+
+        Dates must normalize to aware UTC datetimes at the boundary so the
+        IPO/delist clamp compares like with like."""
+        fetcher = _make_fetcher(lmdb_storage)
+        mock_provider = MagicMock()
+        mock_provider.get_instrument_bounds = MagicMock(
+            return_value={"ipo_date": None, "delist_date": None}
+        )
+        mock_provider.fetch.return_value = make_ohlcv(
+            "2025-06-10", periods=8, freq="1D"
+        )
+        fetcher._providers._providers = {"databento": mock_provider}
+        fetcher._metadata.set_lifecycle_bounds(
+            "SHY", datetime(2025, 6, 10, tzinfo=timezone.utc), None
+        )
+
+        result = fetcher.get_data(
+            AssetType.EQUITY_US,
+            "databento",
+            Resolution.ONE_DAY,
+            ["SHY"],
+            date(2025, 6, 9),
+            date(2025, 6, 23),
+        )
+        assert not result.empty
+        # The tz-aware cached IPO clamped the effective start: the first
+        # gap fetch begins at 2025-06-10T00:00Z, not the raw date midnight
+        # interpreted as something else.
+        fetched_start = mock_provider.fetch.call_args.kwargs["start"]
+        assert fetched_start == datetime(2025, 6, 10, tzinfo=timezone.utc)
+
+    def test_get_data_normalizes_naive_datetimes_to_utc(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Naive datetimes are treated as UTC (same path as the docs'
+        aligned UTC DatetimeIndex promise) instead of crashing against
+        aware metadata values."""
+        fetcher = _make_fetcher(lmdb_storage)
+        mock_provider = MagicMock()
+        mock_provider.get_instrument_bounds = MagicMock(
+            return_value={"ipo_date": datetime(2020, 1, 1, tzinfo=timezone.utc), "delist_date": None}
+        )
+        mock_provider.fetch.return_value = make_ohlcv(
+            "2024-01-02", periods=24, freq="1h"
+        )
+        fetcher._providers._providers = {"databento": mock_provider}
+
+        result = fetcher.get_data(
+            AssetType.EQUITY_US,
+            "databento",
+            Resolution.ONE_DAY,
+            ["AAPL"],
+            datetime(2024, 1, 2),
+            datetime(2024, 1, 3),
+        )
+        assert not result.empty
+        fetched_start = mock_provider.fetch.call_args.kwargs["start"]
+        assert fetched_start == datetime(2024, 1, 2, tzinfo=timezone.utc)
+
+    def test_get_data_rejects_string_range(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """ISO strings stay rejected (documented convention: date objects,
+        not strings) — with a clear TypeError naming the argument."""
+        fetcher = _make_fetcher(lmdb_storage)
+        with pytest.raises(TypeError, match="start must be"):
+            fetcher.get_data(
+                AssetType.EQUITY_US,
+                "databento",
+                Resolution.ONE_DAY,
+                ["AAPL"],
+                "2025-06-09",
+                "2025-06-23",
+            )
 
 
 class TestCostGate:
