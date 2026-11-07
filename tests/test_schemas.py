@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from fin3.schemas import (
     OHLCV_COLUMNS,
@@ -28,21 +29,29 @@ class TestLibraryName:
         assert library_name(AssetType.EQUITY_US, Resolution.FIFTEEN_MINUTE, "databento") == "equities-15m-databento"
         assert library_name(AssetType.FUTURES, Resolution.FOUR_HOUR, "databento") == "futures-4h-databento"
 
-    def test_unmapped_asset_type_falls_back_to_enum_value(self) -> None:
-        """``_ASSET_PREFIX.get(asset_type, asset_type.value)``: an asset type
-        with no prefix mapping silently degrades to its ``.value`` as prefix.
+    def test_options_fixed_library_and_rejection_boundaries(self) -> None:
+        """Options EOD is fixed: (1d, eodhd_options) → options-eod-eodhd;
+        every other options combination raises instead of synthesizing a
+        library name, and unknown asset types raise rather than falling
+        back to the enum value."""
+        assert (
+            library_name(AssetType.OPTIONS, Resolution.ONE_DAY, "eodhd_options")
+            == "options-eod-eodhd"
+        )
+        with pytest.raises(ValueError, match="options EOD uses provider"):
+            library_name(AssetType.OPTIONS, Resolution.ONE_HOUR, "eodhd_options")
+        with pytest.raises(ValueError, match="options EOD uses provider"):
+            library_name(AssetType.OPTIONS, Resolution.ONE_DAY, "cboe")
 
-        NOTE: this silent fallback is flagged for feat-020 (options)
-        loud-fanout work — until then, pin the current behavior. All current
-        AssetType members are mapped, so the fallback is exercised through a
-        duck-typed stand-in, the same code path a future OPTIONS member would
-        hit on its first call.
-        """
+    def test_unsupported_bar_asset_type_raises(self) -> None:
+        """Bar library names are mapped, never silently derived from a raw
+        enum value: an unmapped asset type is an explicit error."""
 
-        class _OptionsLike:
-            value = "options"
+        class _Unmapped:
+            value = "mystery"
 
-        assert library_name(_OptionsLike(), Resolution.FIVE_MINUTE, "databento") == "options-5m-databento"
+        with pytest.raises(ValueError, match="unsupported asset type"):
+            library_name(_Unmapped(), Resolution.FIVE_MINUTE, "databento")  # type: ignore[arg-type]
 
 
 class TestAssetType:

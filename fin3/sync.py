@@ -29,7 +29,7 @@ from fin3.exceptions import (
 )
 from fin3.manifest import ResolvedDataset, ResolvedManifest
 from fin3.providers import ProviderRegistry
-from fin3.providers.base import DataProvider
+from fin3.providers.base import ChainProvider, DataProvider
 from fin3.schemas import METADATA_LIBRARY, AssetType, observation_mask
 from fin3.storage.arctic import ArcticStorage
 from fin3.utils.validation import validate_storage_artifact
@@ -519,6 +519,12 @@ class ManifestRunner:
                 raise ConfigurationError(
                     f"manifest {manifest.id!r}: provider {name!r} is not registered "
                     f"(registered: {sorted(ProviderRegistry._PROVIDER_MAP)})"
+                )
+            if issubclass(ProviderRegistry._PROVIDER_MAP[name], ChainProvider):
+                raise ConfigurationError(
+                    f"manifest {manifest.id!r}: provider {name!r} is a chain "
+                    "provider; options datasets use OptionsDataFetcher, not "
+                    "manifest sync"
                 )
 
     def _provider_for(self, name: str) -> DataProvider:

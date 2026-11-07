@@ -10,11 +10,14 @@ from fin3.exceptions import (
     ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
+    RequestLimitExceededError,
     SchemaValidationError,
     StorageError,
 )
 from fin3.inspect import LibraryOverview, SymbolProfile, inspect_library
 from fin3.monitoring import ResourceReport, ResourceTracker
+from fin3.options import ChainResult, OptionsDataFetcher
+from fin3.options_schemas import ChainCoverageManifest
 from fin3.schemas import AssetType, Resolution
 from fin3.storage.defrag import DefragReport, SymbolDefragResult, defragment_library, get_fragmentation_info
 from fin3.utils.integrity import IntegrityIssue, IntegrityReport, check_integrity
@@ -22,6 +25,8 @@ from fin3.utils.integrity import IntegrityIssue, IntegrityReport, check_integrit
 __all__ = [
     "AssetType",
     "BoundaryMismatchError",
+    "ChainCoverageManifest",
+    "ChainResult",
     "ClientConfig",
     "ConfigurationError",
     "DataValidationError",
@@ -31,7 +36,9 @@ __all__ = [
     "IntegrityReport",
     "LibraryOverview",
     "MarketDataFetcher",
+    "OptionsDataFetcher",
     "ProviderError",
+    "RequestLimitExceededError",
     "ResourceReport",
     "ResourceTracker",
     "ProviderRateLimitError",

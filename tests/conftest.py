@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +15,25 @@ from fin3.config.settings import (
 )
 from fin3.schemas import empty_ohlcv
 from fin3.storage.arctic import ArcticStorage
+
+
+@pytest.fixture(autouse=True)
+def _isolate_unit_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """Prevent unit tests from reading real credentials.
+
+    pydantic-settings reads both .env and env vars. We disable the dotenv
+    source and clear all FIN3_* vars plus the raw EODHD_API_KEY for every
+    non-integration test, so offline tests never see real credentials and
+    never open network connections. Integration tests (marked ``integration``)
+    intentionally see their own loaded environment and are skipped here.
+    """
+    if "integration" in request.keywords:
+        return
+    original = ClientConfig.model_config.copy()
+    monkeypatch.setattr(ClientConfig, "model_config", {**original, "env_file": None})
+    for key in list(os.environ):
+        if key.startswith("FIN3_") or key == "EODHD_API_KEY":
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture

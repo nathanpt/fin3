@@ -193,6 +193,8 @@ class LibraryEntry(BaseModel):
 
     @model_validator(mode="after")
     def _resolve_calendar(self) -> "LibraryEntry":
+        if self.asset_type is AssetType.OPTIONS:
+            raise ValueError("options datasets use OptionsDataFetcher")
         if (
             self.asset_type is AssetType.INDEX_US
             and self.resolution is not Resolution.ONE_DAY

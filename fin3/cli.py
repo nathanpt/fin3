@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from fin3.config.settings import ClientConfig
 from fin3.exceptions import ConfigurationError, CostLimitExceededError, Fin3Error
@@ -49,18 +49,32 @@ def _build_runner(config: ClientConfig) -> ManifestRunner:
 
 
 def _collect_secrets(config: ClientConfig | None) -> list[str]:
-    """Return configured secret values (API keys, MinIO credentials)."""
+    """Return configured secret values (API keys, MinIO credentials).
+
+    Recognizes plain ``str`` fields and ``SecretStr`` fields (via
+    ``get_secret_value()``) — including the hidden top-level
+    ``ClientConfig.eodhd_api_key``. This is a redaction boundary: the
+    collected values must never appear in dumps, errors, reports, or URLs.
+    """
     if config is None:
         return []
     secrets: list[str] = []
-    models = [config.minio, *config.providers.values()]
+    models: list[object] = [config.minio, *config.providers.values()]
     for model in models:
         for name in getattr(type(model), "model_fields", {}):
             if "key" not in name and "secret" not in name:
                 continue
             value = getattr(model, name, None)
-            if isinstance(value, str) and value:
+            if isinstance(value, SecretStr):
+                raw = value.get_secret_value()
+                if raw:
+                    secrets.append(raw)
+            elif isinstance(value, str) and value:
                 secrets.append(value)
+    # Top-level hidden raw key (a bare SecretStr field, not a model).
+    raw_key = config.eodhd_api_key
+    if isinstance(raw_key, SecretStr) and raw_key.get_secret_value():
+        secrets.append(raw_key.get_secret_value())
     return sorted(set(secrets), key=len, reverse=True)
 
 

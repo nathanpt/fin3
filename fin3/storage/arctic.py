@@ -357,20 +357,30 @@ class ArcticStorage:
         self._library_cache[name] = lib
         return lib
 
-    def read(
+    def read_with_metadata(
         self,
         library: str,
         symbol: str,
         date_range: tuple[datetime | None, datetime | None] | None = None,
         columns: list[str] | None = None,
-    ) -> pd.DataFrame | None:
-        """Read data for *symbol* from *library*. Returns None if symbol not found.
+    ) -> tuple[pd.DataFrame, object] | None:
+        """Read data and metadata for *symbol* from one ``lib.read()`` call.
+
+        Returns ``None`` if the symbol (or library) does not exist. Data and
+        metadata come from the **same** version, so callers pairing a chain
+        frame with its coverage manifest cannot observe a torn read.
 
         Parameters
         ----------
         columns : list[str] or None
             If provided, only read the specified columns from storage.
             The index is always returned regardless.
+
+        Returns
+        -------
+        tuple[pd.DataFrame, object] or None
+            ``(data, metadata)`` — metadata is ``None`` when the version
+            carries none.
         """
         lib = self._get_existing_library(library)
         if lib is None:
@@ -383,11 +393,34 @@ class ArcticStorage:
                 kwargs["columns"] = columns
             with _suppress_blockmanager_warning():
                 result = lib.read(symbol, **kwargs)
-                return result.data  # type: ignore[no-any-return]
+                return (result.data, result.metadata)
         except adb.exceptions.NoSuchVersionException:
             return None
         except Exception as exc:
             raise StorageError(f"Failed to read {library}/{symbol}") from exc
+
+    def read(
+        self,
+        library: str,
+        symbol: str,
+        date_range: tuple[datetime | None, datetime | None] | None = None,
+        columns: list[str] | None = None,
+    ) -> pd.DataFrame | None:
+        """Read data for *symbol* from *library*. Returns None if symbol not found.
+
+        Delegates to :meth:`read_with_metadata` and discards the metadata;
+        the caller-facing signature and behavior are unchanged.
+
+        Parameters
+        ----------
+        columns : list[str] or None
+            If provided, only read the specified columns from storage.
+            The index is always returned regardless.
+        """
+        result = self.read_with_metadata(library, symbol, date_range, columns)
+        if result is None:
+            return None
+        return result[0]
 
     def write(
         self,

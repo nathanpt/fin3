@@ -430,6 +430,8 @@ def _validate_inputs(
         and resolution is not Resolution.ONE_DAY
     ):
         raise ValueError("index_us supports only resolution 1d")
+    if asset_type is AssetType.OPTIONS:
+        raise ValueError("options datasets use OptionsDataFetcher")
     if not symbols:
         raise ValueError("symbols must be a non-empty list")
     # Reject obviously-invalid symbols (e.g. "...", "???", "---") early with a

@@ -256,7 +256,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--asset-type", default="equity_us",
-        choices=[a.value for a in AssetType],
+        choices=[a.value for a in AssetType if a is not AssetType.OPTIONS],
         help="Asset type selecting observation semantics: index libraries "
         "count null bars by missing close (default: equity_us)",
     )

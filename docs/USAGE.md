@@ -576,6 +576,8 @@ with ResourceTracker(
 | `EQUITY_US` | NYSE trading hours | US-listed stocks, ETFs |
 | `CRYPTO` | Continuous 24/7 | Crypto pairs (BTC-USD, ETH-USD) |
 | `FUTURES` | CME trading hours | CME futures (ES, NQ, etc.) |
+| `INDEX_US` | XNYS session labels (proxy) | Daily index close levels |
+| `OPTIONS` | XNYS session-label proxy only | Historical EOD option chains — **not** usable with `get_data()`; see [Options EOD chains](options-eodhd.md) |
 
 ### Resolution
 

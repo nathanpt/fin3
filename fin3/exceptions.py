@@ -98,3 +98,29 @@ class CostLimitExceededError(Fin3Error):
         """
         self.estimated_cost = estimated_cost
         self.max_cost = max_cost
+
+
+class RequestLimitExceededError(Fin3Error):
+    """A per-run provider request budget would be exceeded.
+
+    Raised *before* performing work that would breach the cap (e.g. an
+    EODHD options run whose known lower-bound request count already exceeds
+    ``max_requests``). Carries the integer counters so callers can report
+    the bound without parsing the message.
+    """
+
+    def __init__(self, message: str, *, requests_used: int, max_requests: int) -> None:
+        """Initialise the error with the budget counters.
+
+        Parameters
+        ----------
+        message : str
+            Human-readable error description.
+        requests_used : int
+            Requests already issued (or the known lower bound) in this run.
+        max_requests : int
+            The configured per-run cap.
+        """
+        super().__init__(message)
+        self.requests_used = requests_used
+        self.max_requests = max_requests

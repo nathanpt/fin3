@@ -82,13 +82,27 @@ def check_integrity(
     asset_type : AssetType or None
         Asset context; ``AssetType.INDEX_US`` selects the index volume
         interpretation (observations carry volume 0 and are judged by close
-        presence).
+        presence). ``AssetType.OPTIONS`` short-circuits: bar rules do not
+        apply to chains, and the report carries a single
+        ``unsupported_asset_type`` issue instead of evaluating them.
 
     Returns
     -------
     IntegrityReport
         Non-throwing report collecting all issues found.
     """
+    if asset_type is AssetType.OPTIONS:
+        return IntegrityReport(
+            total_bars_expected=len(grid),
+            total_bars_found=0 if df is None else len(df),
+            issues=[
+                IntegrityIssue(
+                    severity="error",
+                    category="unsupported_asset_type",
+                    detail="options data requires validate_chain_frame",
+                )
+            ],
+        )
     if df is None:
         # Zero-row frames evaluate only grid rules: no-data with a nonempty
         # grid reports missing_bar via the registry like any other frame.

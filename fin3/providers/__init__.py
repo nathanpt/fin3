@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 
 from fin3.exceptions import ConfigurationError
+from fin3.providers.base import ChainProvider
 
 if TYPE_CHECKING:
     from fin3.providers.base import DataProvider
+
+_ProviderT = TypeVar("_ProviderT", bound="DataProvider | ChainProvider")
+"""Concrete provider class type preserved through the register decorator."""
+
+_PROVIDER_TYPE_ERROR = (
+    "provider {name!r} is a {kind}; use {getter} for chain providers"
+)
 
 
 class ProviderRegistry:
@@ -15,7 +23,10 @@ class ProviderRegistry:
 
     Providers register themselves via the ``@ProviderRegistry.register(name)``
     classmethod decorator. The registry instantiates providers on ``__init__``
-    using the configuration dict passed in.
+    using the configuration dict passed in. OHLCV ``DataProvider`` instances
+    are resolved via ``get``; chain ``ChainProvider`` instances only via
+    ``get_chain`` — ``get`` rejects chain providers so bar pipelines cannot
+    silently consume chain data.
     """
 
     _PROVIDER_MAP: dict[str, type[Any]] = {}
@@ -33,7 +44,7 @@ class ProviderRegistry:
         ConfigurationError
             If a provider name is not registered.
         """
-        self._providers: dict[str, DataProvider] = {}
+        self._providers: dict[str, DataProvider | ChainProvider] = {}
         for name, config in configs.items():
             if name not in self._PROVIDER_MAP:
                 raise ConfigurationError(
@@ -42,7 +53,7 @@ class ProviderRegistry:
             self._providers[name] = self._PROVIDER_MAP[name](config)
 
     def get(self, name: str) -> DataProvider:
-        """Return a configured provider instance by name.
+        """Return a configured bar (OHLCV) provider instance by name.
 
         Parameters
         ----------
@@ -57,7 +68,8 @@ class ProviderRegistry:
         Raises
         ------
         ConfigurationError
-            If the provider is not in the configured set.
+            If the provider is not in the configured set, or is a
+            ``ChainProvider`` (those require ``get_chain``).
         """
         if name not in self._providers:
             raise ConfigurationError(
@@ -65,13 +77,44 @@ class ProviderRegistry:
                 f"Add FIN3_PROVIDERS__{name.upper()}__API_KEY to your .env. "
                 f"Available: {list(self._providers.keys())}"
             )
-        return self._providers[name]
+        provider = self._providers[name]
+        if isinstance(provider, ChainProvider):
+            raise ConfigurationError(
+                _PROVIDER_TYPE_ERROR.format(name=name, kind="ChainProvider", getter="get_chain()")
+            )
+        return provider
+
+    def get_chain(self, name: str) -> ChainProvider:
+        """Return a configured chain provider instance by name.
+
+        Raises
+        ------
+        ConfigurationError
+            If the provider is not configured or is not a ``ChainProvider``.
+        """
+        if name not in self._providers:
+            raise ConfigurationError(
+                f"Provider '{name}' not configured. "
+                f"Add FIN3_PROVIDERS__{name.upper()}__API_KEY to your .env. "
+                f"Available: {list(self._providers.keys())}"
+            )
+        provider = self._providers[name]
+        if not isinstance(provider, ChainProvider):
+            raise ConfigurationError(
+                f"provider {name!r} is not a ChainProvider; use get() for "
+                "bar (OHLCV) providers"
+            )
+        return provider
 
     @classmethod
-    def register(cls, name: str) -> Callable[[type[DataProvider]], type[DataProvider]]:
-        """Class-level decorator to register provider classes."""
+    def register(cls, name: str) -> Callable[[type[_ProviderT]], type[_ProviderT]]:
+        """Class-level decorator to register provider classes.
 
-        def decorator(provider_cls: type[DataProvider]) -> type[DataProvider]:
+        Generic over the concrete provider class so decorators retain the
+        ``DataProvider``/``ChainProvider`` subclass type.
+        """
+
+        def decorator(provider_cls: type[_ProviderT]) -> type[_ProviderT]:
             cls._PROVIDER_MAP[name] = provider_cls
             return provider_cls
 
@@ -92,7 +135,9 @@ def _register_builtin_providers() -> None:
     """
     from importlib import import_module
 
-    for module_name in ("databento", "binance", "yfinance", "massive", "cboe"):
+    for module_name in (
+        "databento", "binance", "yfinance", "massive", "cboe", "eodhd_options",
+    ):
         import_module(f"fin3.providers.{module_name}")
 
 

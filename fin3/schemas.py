@@ -11,6 +11,8 @@ import pandas as pd
 if TYPE_CHECKING:
     from fin3.calendar.exchange import CalendarStrategy
 
+from fin3.options_schemas import OPTIONS_EOD_LIBRARY
+
 OHLCV_COLUMNS = ("open", "high", "low", "close", "volume")
 """Tuple of canonical OHLCV column names used throughout fin3."""
 
@@ -34,6 +36,7 @@ class AssetType(str, Enum):
     CRYPTO = "crypto"
     FUTURES = "futures"
     INDEX_US = "index_us"
+    OPTIONS = "options"
 
     @property
     def calendar_strategy(self) -> CalendarStrategy:
@@ -57,6 +60,11 @@ class AssetType(str, Enum):
             # on equity-session stamps. It is NOT a claim that the index
             # trades on NYSE.
             AssetType.INDEX_US: "XNYS",
+            # XNYS for options is ONLY a session-label proxy used to classify
+            # whether an observation date looks like an equity session. It is
+            # NOT an options closing-time claim and never reindexes chains
+            # onto its grid; non-session source dates are retained and flagged.
+            AssetType.OPTIONS: "XNYS",
         }
         return mapping[self]
 
@@ -106,15 +114,26 @@ def library_name(asset_type: AssetType, resolution: Resolution, provider: str) -
     """Build the ArcticDB library/bucket name: ``{asset_type}-{resolution}-{provider}``.
 
     Convention matches existing MinIO buckets: ``equities-1m-databento``,
-    ``crypto-1m-binance``, etc.
+    ``crypto-1m-binance``, etc. Options EOD is fixed:
+    ``(ONE_DAY, "eodhd_options")`` maps to ``options-eod-eodhd``; every other
+    options combination is an error. Unmapped asset types raise — no silent
+    enum-value fallback.
     """
+    if asset_type is AssetType.OPTIONS:
+        if resolution is Resolution.ONE_DAY and provider == "eodhd_options":
+            return OPTIONS_EOD_LIBRARY
+        raise ValueError(
+            "options EOD uses provider eodhd_options and OptionsDataFetcher"
+        )
     _ASSET_PREFIX: dict[AssetType, str] = {
         AssetType.EQUITY_US: "equities",
         AssetType.CRYPTO: "crypto",
         AssetType.FUTURES: "futures",
         AssetType.INDEX_US: "indices",
     }
-    prefix = _ASSET_PREFIX.get(asset_type, asset_type.value)
+    if asset_type not in _ASSET_PREFIX:
+        raise ValueError(f"unsupported asset type {asset_type.value!r} for bar libraries")
+    prefix = _ASSET_PREFIX[asset_type]
     return f"{prefix}-{resolution.value}-{provider}"
 
 
@@ -130,7 +149,12 @@ def observation_mask(
 
     Call only after the required columns (``close``/``volume``) are
     established on *df*.
+
+    Options chains are never padded, so an observation mask does not exist
+    for them: :func:`AssetType.OPTIONS` raises.
     """
+    if asset_type is AssetType.OPTIONS:
+        raise ValueError("options data requires validate_chain_frame")
     if asset_type is AssetType.INDEX_US:
         return df["close"].notna()
     return df["volume"] > 0

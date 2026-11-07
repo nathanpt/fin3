@@ -55,6 +55,8 @@ def _validate(
     asset_type: AssetType | None = None,
 ) -> None:
     """Evaluate the registry for *scope*, raising on the first error."""
+    if asset_type is AssetType.OPTIONS:
+        raise SchemaValidationError("options data requires validate_chain_frame")
     context = RuleContext(resolution=resolution, scope=scope, asset_type=asset_type)
     for rule, finding in evaluate_rules(df, context):
         if rule.severity == "error":

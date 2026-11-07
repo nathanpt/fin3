@@ -105,7 +105,18 @@ def inspect_library(
         Asset context; ``AssetType.INDEX_US`` counts null bars by missing
         close (index observations legitimately carry volume 0) and passes
         the context to integrity checks.
+
+    Raises
+    ------
+    ValueError
+        If *asset_type* is ``AssetType.OPTIONS``: chains are profiled via
+        ``OptionsDataFetcher.read_chain`` and their coverage manifest, not
+        the bar inspector.
     """
+    if asset_type is AssetType.OPTIONS:
+        raise ValueError(
+            "options data uses OptionsDataFetcher.read_chain and its coverage manifest"
+        )
     symbols = storage.list_symbols(library)
     if not symbols:
         return LibraryOverview(

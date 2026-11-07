@@ -1,34 +1,93 @@
 """Tests for configuration loading."""
 
-import os
-
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from fin3.config.settings import (
     BinanceConfig,
     CboeConfig,
     ClientConfig,
     DatabentoConfig,
+    EodhdOptionsConfig,
     MassiveConfig,
     MinioConfig,
     YahooConfig,
 )
 
 
-@pytest.fixture(autouse=True)
-def _no_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Prevent unit tests from reading the project .env file.
+class TestEodhdOptionsConfig:
+    def test_defaults(self) -> None:
+        config = EodhdOptionsConfig()
+        assert config.provider_type == "eodhd_options"
+        assert config.api_key is None
+        assert config.base_url == "https://eodhd.com/api/mp/unicornbay/options"
+        assert config.timeout == 30.0
+        assert config.max_requests() == 200
+        assert config.request_pacing_s == 0.15
+        assert config.page_size == 1000
 
-    pydantic-settings reads both .env and env vars. The integration conftest
-    calls load_dotenv() at module level, polluting os.environ. We clear all
-    FIN3_ env vars so unit tests don't pick up real credentials.
-    """
-    original = ClientConfig.model_config.copy()
-    monkeypatch.setattr(ClientConfig, "model_config", {**original, "env_file": None})
-    for key in list(os.environ):
-        if key.startswith("FIN3_"):
-            monkeypatch.delenv(key, raising=False)
+    def test_env_parsing_for_cap_and_page_size(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FIN3_PROVIDERS__EODHD_OPTIONS__PROVIDER_TYPE", "eodhd_options")
+        monkeypatch.setenv("FIN3_PROVIDERS__EODHD_OPTIONS__PER_RUN_MAX_REQUESTS", "300")
+        monkeypatch.setenv("FIN3_PROVIDERS__EODHD_OPTIONS__PAGE_SIZE", "500")
+        config = ClientConfig(
+            minio=MinioConfig(endpoint="e", access_key="a", secret_key="s"),
+            _env_file=None,
+        )
+        provider_config = config.providers["eodhd_options"]
+        assert isinstance(provider_config, EodhdOptionsConfig)
+        assert provider_config.per_run_max_requests == 300
+        assert provider_config.page_size == 500
+
+    def test_bool_and_fractional_integers_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(ValidationError):
+            EodhdOptionsConfig(per_run_max_requests=True)
+        with pytest.raises(ValidationError):
+            EodhdOptionsConfig(page_size=10.5)
+        with pytest.raises(ValidationError):
+            EodhdOptionsConfig(per_run_max_requests="200.5")
+
+    def test_page_size_bounds(self) -> None:
+        assert EodhdOptionsConfig(page_size=1).page_size == 1
+        with pytest.raises(ValidationError):
+            EodhdOptionsConfig(page_size=1001)
+        with pytest.raises(ValidationError):
+            EodhdOptionsConfig(page_size=0)
+
+    def test_base_url_validation(self) -> None:
+        assert EodhdOptionsConfig(
+            base_url="https://proxy.example.com/api/mp/unicornbay/options/"
+        ).base_url == "https://proxy.example.com/api/mp/unicornbay/options"
+        with pytest.raises(ValidationError, match="HTTPS"):
+            EodhdOptionsConfig(base_url="http://eodhd.com/api")
+        with pytest.raises(ValidationError, match="nonempty"):
+            EodhdOptionsConfig(base_url="   ")
+
+    def test_blank_secret_key_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="must not be empty"):
+            EodhdOptionsConfig(api_key=SecretStr("   "))
+        # None stays legal (unresolved key resolved later from the raw secret).
+        assert EodhdOptionsConfig(api_key=None).api_key is None
+
+    def test_timeout_and_pacing_bounds(self) -> None:
+        with pytest.raises(ValidationError):
+            EodhdOptionsConfig(timeout=0)
+        with pytest.raises(ValidationError):
+            EodhdOptionsConfig(request_pacing_s=float("nan"))
+        assert EodhdOptionsConfig(request_pacing_s=0).request_pacing_s == 0
+
+    def test_secret_masked_in_repr_and_dump(self) -> None:
+        config = EodhdOptionsConfig(api_key=SecretStr("HIDDEN-VALUE-77"))
+        assert "HIDDEN-VALUE-77" not in repr(config)
+        assert "HIDDEN-VALUE-77" not in str(config.model_dump())
+
+    def test_extra_fields_forbidden(self) -> None:
+        with pytest.raises(ValidationError):
+            EodhdOptionsConfig(api_key=SecretStr("k"), unknown_setting=1)
 
 
 class TestClientConfig:
