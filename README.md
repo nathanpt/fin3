@@ -139,6 +139,9 @@ in the public checkout; this README summarizes public implemented/planned status
 - [API reference source](docs/api/index.md).
 - [Resource monitoring notes](docs/resource-monitoring-notes.md).
 - [Repository guidelines](AGENTS.md).
+- End-to-end verification: before claiming CLI, planner, or retrieval changes are
+  done, run `uv run python scripts/verify.py all`. Per-feature commands and known
+  traps: `.omp/skills/verify-fin3/references/features/`.
 
 ```bash
 uv sync --all-extras
