@@ -104,6 +104,13 @@ a symbol/field MultiIndex DataFrame. Library names follow
 volume. Trading sessions depend on the asset calendar and daylight-saving time;
 NYSE hours are not a fixed UTC interval year-round.
 
+A request whose range is already fully covered is served from storage alone:
+no provider configuration or provider extra is needed, and no provider calls
+are made. The provider is required only when a gap would actually be fetched —
+without one, `get_data()` raises `ConfigurationError` naming the provider and
+the environment variable to set. A configured provider whose SDK extra is not
+installed does not break construction; it fails only if a fetch needs it.
+
 ## Standalone tools
 
 The installed `fin3` command drives the declarative manifest workflow

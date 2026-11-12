@@ -94,6 +94,14 @@ class MetadataStore:
 
         Returns (ipo_date, delist_date). Either may be None.
 
+        With ``provider=None`` (storage-only gap discovery, no provider
+        configured), only the cache is consulted: a cache miss resolves to
+        (None, None) without persisting anything. Clamping then relies on the
+        calendar alone until a provider-backed bootstrap persists real bounds.
+        If a gap does need filling, ``MarketDataFetcher.get_data`` resolves
+        the provider and raises ``ConfigurationError`` at fetch time
+        (GitHub issue #12).
+
         The discovery fetch cannot freely probe the provider's full history,
         so a first observation that lands on the window's first expected bar
         does NOT prove a listing date — the symbol may simply extend earlier.
@@ -108,6 +116,12 @@ class MetadataStore:
         if cached is not None:
             logger.debug("metadata.cache_hit", symbol=symbol)
             return cached.get("ipo_date"), cached.get("delist_date")
+
+        if provider is None:
+            # Storage-only gap discovery: bounds stay unknown and nothing is
+            # persisted, so a later provider-backed bootstrap still runs.
+            logger.info("metadata.no_provider", symbol=symbol, action="bounds_unknown")
+            return None, None
 
         logger.info("metadata.cache_miss", symbol=symbol, action="bootstrap")
 
@@ -144,9 +158,7 @@ class MetadataStore:
                 discovery_df = provider.fetch(**fetch_kwargs)
                 if discovery_df is not None and not discovery_df.empty:
                     first_bar = discovery_df.index[0].to_pydatetime()
-                    reference = self._first_expected_bar(
-                        calendar, start, resolution
-                    )
+                    reference = self._first_expected_bar(calendar, start, resolution)
                     if first_bar > reference:
                         ipo_date = first_bar
                         logger.info(
@@ -187,7 +199,9 @@ class MetadataStore:
         if calendar is not None:
             try:
                 res = (
-                    resolution if isinstance(resolution, Resolution) else Resolution.ONE_DAY
+                    resolution
+                    if isinstance(resolution, Resolution)
+                    else Resolution.ONE_DAY
                 )
                 probe_end = pd.Timestamp(start) + pd.Timedelta(
                     days=_DISCOVERY_PROBE_DAYS

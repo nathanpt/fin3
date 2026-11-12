@@ -1,10 +1,12 @@
 """End-to-end tests for MarketDataFetcher."""
 
 from datetime import date, datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
+import sys
 
 from fin3.config.settings import (
     CboeConfig,
@@ -18,6 +20,7 @@ from fin3.exceptions import (
     ConfigurationError,
     CostLimitExceededError,
     DataValidationError,
+    ProviderError,
 )
 from fin3.metadata.asset_profile import MetadataStore
 from fin3.monitoring.tracker import ResourceTracker
@@ -32,11 +35,15 @@ def _make_fetcher(storage: ArcticStorage) -> MarketDataFetcher:
     fetcher = MarketDataFetcher.__new__(MarketDataFetcher)
     fetcher._config = ClientConfig(
         minio=MinioConfig(endpoint="unused", access_key="t", secret_key="t"),
-        providers={"databento": DatabentoConfig(api_key="test_key"), "cboe": CboeConfig()},
+        providers={
+            "databento": DatabentoConfig(api_key="test_key"),
+            "cboe": CboeConfig(),
+        },
     )
     fetcher._storage = storage
     fetcher._providers = ProviderRegistry.__new__(ProviderRegistry)
     fetcher._providers._providers = {}
+    fetcher._providers._configs = {}
     fetcher._metadata = MetadataStore(storage)
     return fetcher
 
@@ -161,7 +168,10 @@ class TestMarketDataFetcherE2E:
         fetcher = _make_fetcher(lmdb_storage)
         mock_provider = MagicMock()
         mock_provider.get_instrument_bounds = MagicMock(
-            return_value={"ipo_date": datetime(2020, 1, 1, tzinfo=timezone.utc), "delist_date": None}
+            return_value={
+                "ipo_date": datetime(2020, 1, 1, tzinfo=timezone.utc),
+                "delist_date": None,
+            }
         )
         mock_provider.fetch.return_value = make_ohlcv(
             "2024-01-02", periods=24, freq="1h"
@@ -180,9 +190,7 @@ class TestMarketDataFetcherE2E:
         fetched_start = mock_provider.fetch.call_args.kwargs["start"]
         assert fetched_start == datetime(2024, 1, 2, tzinfo=timezone.utc)
 
-    def test_get_data_rejects_string_range(
-        self, lmdb_storage: ArcticStorage
-    ) -> None:
+    def test_get_data_rejects_string_range(self, lmdb_storage: ArcticStorage) -> None:
         """ISO strings stay rejected (documented convention: date objects,
         not strings) — with a clear TypeError naming the argument."""
         fetcher = _make_fetcher(lmdb_storage)
@@ -306,9 +314,7 @@ class TestCostGate:
             def fetch(self, **kwargs: object) -> pd.DataFrame:
                 return make_ohlcv("2024-01-01 00:00", periods=24, freq="1h")
 
-            def get_instrument_bounds(
-                self, symbol: str
-            ) -> dict[str, datetime | None]:
+            def get_instrument_bounds(self, symbol: str) -> dict[str, datetime | None]:
                 return {"ipo_date": None, "delist_date": None}
 
         fetcher = _make_fetcher(lmdb_storage)
@@ -581,7 +587,9 @@ class TestGetDataSemantics:
 
         close = result[("BTC-USD", "close")]
         # 24 distinct closes, byte-for-byte the provider's series.
-        pd.testing.assert_series_equal(close, bars["close"], check_freq=False, check_names=False)
+        pd.testing.assert_series_equal(
+            close, bars["close"], check_freq=False, check_names=False
+        )
         assert close.nunique() == 24
         assert close.iloc[0] == 100.2
         assert close.iloc[-1] == pytest.approx(102.5)
@@ -656,8 +664,12 @@ class TestGetDataSemantics:
         assert stored is not None
         assert stored.loc[pd.Timestamp("2024-01-01 08:00", tz="UTC"), "close"] == 100.2
         assert stored.loc[pd.Timestamp("2024-01-01 09:00", tz="UTC"), "close"] == 100.3
-        assert stored.loc[pd.Timestamp("2024-01-01 08:00", tz="UTC"), "volume"] == 1000.0
-        assert stored.loc[pd.Timestamp("2024-01-01 09:00", tz="UTC"), "volume"] == 1000.0
+        assert (
+            stored.loc[pd.Timestamp("2024-01-01 08:00", tz="UTC"), "volume"] == 1000.0
+        )
+        assert (
+            stored.loc[pd.Timestamp("2024-01-01 09:00", tz="UTC"), "volume"] == 1000.0
+        )
 
     def test_incremental_window_fetches_only_new_day(
         self, lmdb_storage: ArcticStorage
@@ -721,8 +733,12 @@ class TestGetDataSemantics:
         assert isinstance(result, pd.DataFrame)
         mock_provider.estimate_cost.assert_called_once()
         cost_call = mock_provider.estimate_cost.call_args
-        assert cost_call.kwargs["start"] == datetime(2024, 1, 1, 8, 0, tzinfo=timezone.utc)
-        assert cost_call.kwargs["end"] == datetime(2024, 1, 1, 16, 0, tzinfo=timezone.utc)
+        assert cost_call.kwargs["start"] == datetime(
+            2024, 1, 1, 8, 0, tzinfo=timezone.utc
+        )
+        assert cost_call.kwargs["end"] == datetime(
+            2024, 1, 1, 16, 0, tzinfo=timezone.utc
+        )
 
     def test_cost_exactly_at_limit_passes(self, lmdb_storage: ArcticStorage) -> None:
         """The cost gate is strict >: estimate == max_cost must not raise."""
@@ -772,9 +788,7 @@ class TestGetDataSemantics:
         assert mock_provider.fetch.call_args.kwargs["start"] == ipo
         assert result.index[0] == pd.Timestamp("2024-01-01 05:00", tz="UTC")
         assert len(result) == 19
-        assert (
-            result.index < pd.Timestamp("2024-01-01 05:00", tz="UTC")
-        ).sum() == 0
+        assert (result.index < pd.Timestamp("2024-01-01 05:00", tz="UTC")).sum() == 0
 
     def test_range_entirely_before_ipo_fetches_nothing(
         self, lmdb_storage: ArcticStorage
@@ -881,12 +895,271 @@ class TestGetDataSemantics:
         assert btc_tail[("BTC-USD", "close")].isna().all()
 
         # Real values survive inside each symbol's own range.
-        assert result.loc[
-            pd.Timestamp("2024-01-01 00:00", tz="UTC"), ("BTC-USD", "close")
-        ] == 100.2
+        assert (
+            result.loc[pd.Timestamp("2024-01-01 00:00", tz="UTC"), ("BTC-USD", "close")]
+            == 100.2
+        )
         assert result.loc[
             pd.Timestamp("2024-01-01 23:00", tz="UTC"), ("ETH-USD", "close")
         ] == pytest.approx(101.7)
+
+
+class TestStorageOnlyReads:
+    """GitHub issue #12: storage-only reads must not require provider config.
+
+    A fully covered range is served with an empty provider registry; the
+    provider is demanded only when a gap would actually be fetched, and a
+    configured provider whose SDK extra is missing fails at fetch time, not
+    at construction.
+    """
+
+    def test_full_coverage_without_provider_config_returns_stored_frame(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Acceptance criterion 2: fully covered range + providers={} returns
+        the stored frame; no provider is ever resolved."""
+        fetcher = _make_fetcher(lmdb_storage)
+        bars = make_ohlcv("2024-01-01 00:00", periods=24, freq="1h")
+        lmdb_storage.write("crypto-1h-databento", "BTC-USD", bars)
+
+        result = fetcher.get_data(
+            asset_type=AssetType.CRYPTO,
+            provider="databento",
+            resolution=Resolution.ONE_HOUR,
+            symbols=["BTC-USD"],
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+        )
+
+        # Wide (symbol, field) frame in the stored (canonical) field order —
+        # single-symbol alignment preserves it (only multi-symbol sorts).
+        expected = bars.copy()
+        expected.columns = pd.MultiIndex.from_product(
+            [["BTC-USD"], list(OHLCV_COLUMNS)]
+        )
+        pd.testing.assert_frame_equal(result, expected, check_freq=False)
+        # Empty registry stayed empty: no provider was instantiated, so no
+        # provider network call was even possible.
+        assert fetcher._providers._providers == {}
+
+    def test_full_coverage_with_max_cost_without_provider_config(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """max_cost does not pull in the provider when nothing will be
+        fetched: covered range + providers={} + max_cost returns the frame."""
+        fetcher = _make_fetcher(lmdb_storage)
+        bars = make_ohlcv("2024-01-01 00:00", periods=24, freq="1h")
+        lmdb_storage.write("crypto-1h-databento", "BTC-USD", bars)
+
+        result = fetcher.get_data(
+            asset_type=AssetType.CRYPTO,
+            provider="databento",
+            resolution=Resolution.ONE_HOUR,
+            symbols=["BTC-USD"],
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+            max_cost=0.01,
+        )
+
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 24
+        assert fetcher._providers._providers == {}
+
+    def test_partial_coverage_without_provider_config_raises_config_error(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Acceptance criterion 3: partially covered range with no provider
+        configured raises ConfigurationError naming the provider and the fix,
+        raised at fetch time (after the covered prefix is checked)."""
+        fetcher = _make_fetcher(lmdb_storage)
+        half = make_ohlcv("2024-01-01 00:00", periods=12, freq="1h")
+        lmdb_storage.write("crypto-1h-databento", "BTC-USD", half)
+
+        with pytest.raises(
+            ConfigurationError, match="Provider 'databento' not configured"
+        ) as excinfo:
+            fetcher.get_data(
+                asset_type=AssetType.CRYPTO,
+                provider="databento",
+                resolution=Resolution.ONE_HOUR,
+                symbols=["BTC-USD"],
+                start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+            )
+
+        assert "FIN3_PROVIDERS__DATABENTO__API_KEY" in str(excinfo.value)
+        # The unmet gap was real: storage still holds only the first half.
+        stored = lmdb_storage.read("crypto-1h-databento", "BTC-USD")
+        assert stored is not None and len(stored) == 12
+
+    def test_new_symbol_without_provider_config_raises_config_error(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """A symbol with no stored data needs a fetch by definition, so an
+        unconfigured provider must raise ConfigurationError."""
+        fetcher = _make_fetcher(lmdb_storage)
+
+        with pytest.raises(ConfigurationError, match="not configured"):
+            fetcher.get_data(
+                asset_type=AssetType.CRYPTO,
+                provider="databento",
+                resolution=Resolution.ONE_HOUR,
+                symbols=["NEWCOIN"],
+                start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+            )
+
+    def test_uncached_bounds_still_clamp_before_fetch(
+        self, lmdb_storage: ArcticStorage
+    ) -> None:
+        """Provider-backed re-detection clamps the window before fetching:
+        a request reaching before the IPO with bounds available only from the
+        provider ref API fetches nothing instead of filling pre-IPO gaps with
+        calendar padding."""
+        fetcher = _make_fetcher(lmdb_storage)
+        ipo = datetime(2024, 6, 3, tzinfo=timezone.utc)
+        bars = make_ohlcv("2024-06-03 00:00", periods=24, freq="1h")
+        lmdb_storage.write("crypto-1h-databento", "BTC-USD", bars)
+
+        mock_provider = _mock_provider()
+        mock_provider.get_instrument_bounds = MagicMock(
+            return_value={"ipo_date": ipo, "delist_date": None}
+        )
+        fetcher._providers._providers = {"databento": mock_provider}
+
+        result = fetcher.get_data(
+            asset_type=AssetType.CRYPTO,
+            provider="databento",
+            resolution=Resolution.ONE_HOUR,
+            symbols=["BTC-USD"],
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 6, 3, 23, 0, tzinfo=timezone.utc),
+        )
+
+        # Clamped to the IPO: the covered post-IPO range needed no fetch.
+        mock_provider.fetch.assert_not_called()
+        assert len(result) == 24
+        # Storage untouched: no pre-IPO null grid was written.
+        stored = lmdb_storage.read("crypto-1h-databento", "BTC-USD")
+        assert stored is not None and len(stored) == 24
+
+    def test_configured_provider_missing_extra_defers_failure_to_fetch(
+        self, tmp_path: Path
+    ) -> None:
+        """Acceptance criterion 1 + issue facet 2: with databento configured
+        but its SDK import impossible, MarketDataFetcher constructs; the
+        ProviderError surfaces only when a fetch needs the provider."""
+
+        class _BlockDatabento:
+            """Meta-path finder making `import databento` fail like a
+            missing optional extra."""
+
+            def find_spec(self, name: str, *args: object) -> object | None:
+                if name == "databento" or name.startswith("databento."):
+                    raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+                    # Returning None would let other finders run; raising
+                    # reproduces the exact ImportError the SDK-absent env
+                    # produces.
+                return None
+
+        sys.modules.pop("databento", None)
+        finder = _BlockDatabento()
+        sys.meta_path.insert(0, finder)  # type: ignore[arg-type]
+        try:
+            config = ClientConfig(
+                minio=MinioConfig(
+                    endpoint="lmdb.invalid:0", access_key="x", secret_key="y"
+                ),
+                providers={"databento": DatabentoConfig(api_key="test_key")},
+                _env_file=None,
+            )
+            # The fix's headline: construction succeeds without the extra.
+            fetcher = MarketDataFetcher(config)
+            storage = ArcticStorage.from_lmdb(str(tmp_path / "lmdb"))
+            fetcher._storage = storage
+            fetcher._metadata._storage = storage
+
+            with pytest.raises(ProviderError, match="No module named 'databento'"):
+                fetcher.get_data(
+                    asset_type=AssetType.CRYPTO,
+                    provider="databento",
+                    resolution=Resolution.ONE_HOUR,
+                    symbols=["BTC-USD"],
+                    start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                    end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+                )
+        finally:
+            sys.meta_path.remove(finder)  # type: ignore[arg-type]
+
+        # A storage-only read through the same fetcher still works: the
+        # failed provider stays unconstructed and never blocks covered reads.
+        bars = make_ohlcv("2024-01-01 00:00", periods=24, freq="1h")
+        lmdb_storage = ArcticStorage.from_lmdb(str(tmp_path / "lmdb"))
+        lmdb_storage.write("crypto-1h-databento", "BTC-USD", bars)
+        config2 = ClientConfig(
+            minio=MinioConfig(
+                endpoint="lmdb.invalid:0", access_key="x", secret_key="y"
+            ),
+            providers={"databento": DatabentoConfig(api_key="test_key")},
+            _env_file=None,
+        )
+        fetcher2 = MarketDataFetcher(config2)
+        fetcher2._storage = lmdb_storage
+        fetcher2._metadata._storage = lmdb_storage
+        result = fetcher2.get_data(
+            asset_type=AssetType.CRYPTO,
+            provider="databento",
+            resolution=Resolution.ONE_HOUR,
+            symbols=["BTC-USD"],
+            start=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            end=datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc),
+        )
+        pd.testing.assert_series_equal(
+            result[("BTC-USD", "close")],
+            bars["close"],
+            check_freq=False,
+            check_names=False,
+        )
+
+
+class TestRegistryLazyInstantiation:
+    """ProviderRegistry defers provider construction to first resolution."""
+
+    def test_unknown_provider_name_still_rejected_at_construction(self) -> None:
+        """Name validation stays eager: a typo'd provider name fails at
+        registry construction, before any SDK import could matter."""
+        with pytest.raises(ConfigurationError, match="Unknown provider 'nope'"):
+            ProviderRegistry({"nope": object()})
+
+    def test_construction_never_instantiates_and_get_does_once(self) -> None:
+        """A provider whose constructor would fail is not constructed at
+        registry construction; first get() constructs exactly once and
+        repeat get() reuses the instance."""
+
+        constructions: list[int] = []
+
+        @ProviderRegistry.register("lazy-test")
+        class _CountingProvider:
+            def __init__(self, config: object) -> None:
+                constructions.append(1)
+
+        monkey_registry_map = ProviderRegistry._PROVIDER_MAP
+        assert "lazy-test" in monkey_registry_map
+
+        registry = ProviderRegistry({"lazy-test": object()})
+        # Construction registered the class but built no instance.
+        assert constructions == []
+
+        first = registry.get("lazy-test")
+        second = registry.get("lazy-test")
+        assert constructions == [1]
+        assert first is second
+
+    def test_get_unconfigured_lists_configured_names(self) -> None:
+        """'Available' names the configured set, not the instantiated set."""
+        registry = ProviderRegistry({"databento": object()})
+        with pytest.raises(ConfigurationError, match=r"Available: \['databento'\]"):
+            registry.get("cboe")
 
 
 class TestValueLevelRejection:
@@ -931,9 +1204,7 @@ class TestValueLevelRejection:
         assert lmdb_storage.arctic[lib].list_versions("BTC-USD") == versions_before
 
 
-def _index_bars(
-    dates: list[str], closes: list[float]
-) -> pd.DataFrame:
+def _index_bars(dates: list[str], closes: list[float]) -> pd.DataFrame:
     """Source-shaped index rows: UTC-midnight labels, close-only encoding."""
     index = pd.DatetimeIndex([pd.Timestamp(d, tz="UTC") for d in dates])
     return pd.DataFrame(
@@ -982,7 +1253,11 @@ class TestIndexDataSemantics:
 
         def fetch(symbol, start, end, resolution, *, asset_type=None, **kw):
             calls.append((symbol, pd.Timestamp(start), pd.Timestamp(end)))
-            wanted = [d for d in self.JAN_SESSIONS if pd.Timestamp(start) <= pd.Timestamp(d, tz="UTC") <= pd.Timestamp(end)]
+            wanted = [
+                d
+                for d in self.JAN_SESSIONS
+                if pd.Timestamp(start) <= pd.Timestamp(d, tz="UTC") <= pd.Timestamp(end)
+            ]
             closes = [self.JAN_CLOSES[self.JAN_SESSIONS.index(d)] for d in wanted]
             return _index_bars(wanted, closes)
 
@@ -1063,9 +1338,7 @@ class TestIndexDataSemantics:
         assert len(provider.calls) == calls_after_first + 1
         fetched_start, fetched_end = provider.calls[-1][1], provider.calls[-1][2]
         assert fetched_start == pd.Timestamp("2024-01-04", tz="UTC")
-        assert fetched_end == pd.Timestamp(
-            "2024-01-05T23:59:59.999999", tz="UTC"
-        )
+        assert fetched_end == pd.Timestamp("2024-01-05T23:59:59.999999", tz="UTC")
         stored = lmdb_storage.read(self._lib(), "VIX")
         assert len(stored) == 4
         assert stored["close"].tolist() == self.JAN_CLOSES

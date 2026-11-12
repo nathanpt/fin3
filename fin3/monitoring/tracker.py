@@ -75,7 +75,11 @@ class _LiveView:
             disk_after_bytes=t._disk_before,
         )
         return render_live_panel(
-            metrics, elapsed, t._phase, t._symbols, t._resolution.value,
+            metrics,
+            elapsed,
+            t._phase,
+            t._symbols,
+            t._resolution.value,
         )
 
 
@@ -98,7 +102,7 @@ class ResourceTracker:
     def __init__(
         self,
         storage: ArcticStorage,
-        provider: DataProvider,
+        provider: DataProvider | None,
         library: str,
         symbols: list[str],
         resolution: Resolution,
@@ -109,8 +113,9 @@ class ResourceTracker:
         ----------
         storage : ArcticStorage
             Storage backend for disk-size measurements.
-        provider : DataProvider
-            Provider instance (wrapped for byte counting).
+        provider : DataProvider or None
+            Provider instance (wrapped for byte counting). ``None`` (storage
+            -only read, no provider needed) skips the fetch instrumentation.
         library : str
             Library/bucket name.
         symbols : list[str]
@@ -164,7 +169,9 @@ class ResourceTracker:
         # The whole-library total is deferred to exit so startup isn't
         # blocked by scanning every symbol in the library.
         self._disk_before = compute_symbol_sizes(
-            self._storage, self._library, self._symbols,
+            self._storage,
+            self._library,
+            self._symbols,
         )
 
         # Start memory sampling
@@ -184,8 +191,9 @@ class ResourceTracker:
             self._abort_setup()
             raise
 
-        logger.info("monitor.tracker_started",
-                     library=self._library, symbols=self._symbols)
+        logger.info(
+            "monitor.tracker_started", library=self._library, symbols=self._symbols
+        )
 
         return self
 
@@ -202,7 +210,9 @@ class ResourceTracker:
         # Final disk sizes: affected symbols (delta) + one whole-library
         # scan for the total (single get_sizes() call, not per-symbol).
         self._disk_after = compute_symbol_sizes(
-            self._storage, self._library, self._symbols,
+            self._storage,
+            self._library,
+            self._symbols,
         )
         self._library_total = compute_library_size(self._storage, self._library)
 
@@ -247,17 +257,22 @@ class ResourceTracker:
             except OSError:
                 pass
 
-        logger.info("monitor.tracker_finished",
-                     library=self._library,
-                     duration=self._end_time - self._start_time,
-                     peak_rss=metrics.peak_rss_bytes,
-                     network_bytes=metrics.network_bytes,
-                     disk_delta=metrics.disk_delta_bytes)
+        logger.info(
+            "monitor.tracker_finished",
+            library=self._library,
+            duration=self._end_time - self._start_time,
+            peak_rss=metrics.peak_rss_bytes,
+            network_bytes=metrics.network_bytes,
+            disk_delta=metrics.disk_delta_bytes,
+        )
 
         return
 
     def _wrap_provider(self) -> None:
         """Monkey-patch the provider's fetch method to count bytes."""
+        if self._provider is None:
+            # Storage-only operation: nothing to instrument.
+            return
         self._original_fetch = self._provider.fetch
         byte_counter = self._byte_counter
 
@@ -278,7 +293,7 @@ class ResourceTracker:
 
     def _restore_provider(self) -> None:
         """Restore the original provider fetch method."""
-        if self._original_fetch is not None:
+        if self._provider is not None and self._original_fetch is not None:
             self._provider.fetch = self._original_fetch  # type: ignore[method-assign]
             self._original_fetch = None
 
@@ -330,13 +345,16 @@ class ResourceTracker:
         """
         if is_in_tmux():
             fd, self._metrics_file = tempfile.mkstemp(
-                suffix=".json", prefix="fin3-monitor-", dir="/tmp",
+                suffix=".json",
+                prefix="fin3-monitor-",
+                dir="/tmp",
             )
             os.close(fd)
             self._write_initial_metrics()
             self._pane_id = create_monitor_pane(self._metrics_file)
             self._writer_thread = threading.Thread(
-                target=self._writer_loop, daemon=True,
+                target=self._writer_loop,
+                daemon=True,
             )
             self._writer_thread.start()
         elif self._is_tty:

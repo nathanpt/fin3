@@ -49,6 +49,13 @@ When fin3 is published to PyPI later, swap to just `"fin3[databento]"`.
     - **Yahoo Finance** (`yfinance`) as a free, keyless alternative for US
       equities and ETFs (unofficial scraper; great for prototyping)
 
+Provider configuration is only needed for gap-filling: `get_data()` over a
+range already fully covered in storage works with storage configuration alone
+(and without any provider extra installed). When a fetch would be required
+and no provider is configured, it raises `ConfigurationError` naming the
+provider and the variable to set. A configured provider whose SDK extra is
+missing fails at first use, not at construction.
+
 ## Setup
 
 ### Configure via `.env`

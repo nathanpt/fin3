@@ -82,22 +82,65 @@ class MarketDataFetcher:
         _validate_inputs(asset_type, provider, resolution, symbols, start, end)
 
         lib_name = library_name(asset_type, resolution, provider)
-        prov = self._providers.get(provider)
         strategy = asset_type.calendar_strategy
 
+        # Provider-free gap discovery: storage, calendar, and cached lifecycle
+        # metadata only. A fully covered range is served without any provider
+        # configuration (GitHub issue #12); the provider is resolved only when
+        # a gap would actually be fetched.
+        candidate_gaps: dict[str, list[tuple[datetime, datetime]]] = {
+            symbol: self._symbol_gaps(
+                lib_name, symbol, None, asset_type, resolution, start, end
+            )
+            for symbol in symbols
+        }
+        prov: DataProvider | None = None
+        if any(candidate_gaps.values()):
+            # Raises ConfigurationError naming the provider and the fix when a
+            # fetch is required but the provider is not configured.
+            prov = self._providers.get(provider)
+
         with ResourceTracker(
-            self._storage, prov, lib_name, symbols, resolution,
+            self._storage,
+            prov,
+            lib_name,
+            symbols,
+            resolution,
         ) as tracker:
-            if max_cost is not None and hasattr(prov, "estimate_cost"):
+            if (
+                max_cost is not None
+                and prov is not None
+                and hasattr(prov, "estimate_cost")
+            ):
                 self._check_cost(
-                    lib_name, symbols, prov, strategy, asset_type, resolution,
-                    start, end, max_cost, tracker,
+                    lib_name,
+                    symbols,
+                    prov,
+                    strategy,
+                    asset_type,
+                    resolution,
+                    start,
+                    end,
+                    max_cost,
+                    tracker,
                 )
 
             for symbol in symbols:
                 tracker.set_phase(f"fetching {symbol}...")
+                if prov is None:
+                    # No symbol has candidate gaps: pure storage read.
+                    logger.info("core.full_coverage", symbol=symbol)
+                    continue
                 self._ensure_symbol(
-                    lib_name, symbol, prov, strategy, asset_type, resolution, start, end
+                    lib_name,
+                    symbol,
+                    prov,
+                    candidate_gaps[symbol],
+                    strategy,
+                    asset_type,
+                    resolution,
+                    start,
+                    end,
                 )
 
             if defrag:
@@ -195,16 +238,25 @@ class MarketDataFetcher:
         self,
         lib_name: str,
         symbol: str,
-        provider: DataProvider,
+        provider: DataProvider | None,
         asset_type: AssetType,
         resolution: Resolution,
         start: datetime,
         end: datetime,
     ) -> list[tuple[datetime, datetime]]:
-        """Compute gaps for *symbol* after IPO/delist clamping."""
+        """Compute gaps for *symbol* after IPO/delist clamping.
+
+        ``provider=None`` restricts the computation to storage and cached
+        lifecycle metadata (no ref API / discovery bootstrap).
+        """
         strategy = asset_type.calendar_strategy
         ipo_date, delist_date = self._metadata.bootstrap_metadata(
-            symbol, provider, start, end, resolution=resolution, calendar=strategy,
+            symbol,
+            provider,
+            start,
+            end,
+            resolution=resolution,
+            calendar=strategy,
         )
 
         eff_start, eff_end = start, end
@@ -220,9 +272,7 @@ class MarketDataFetcher:
         if eff_start >= eff_end:
             return []
 
-        existing = self._storage.read(
-            lib_name, symbol, date_range=(eff_start, eff_end)
-        )
+        existing = self._storage.read(lib_name, symbol, date_range=(eff_start, eff_end))
         return detect_gaps(existing, eff_start, eff_end, asset_type, resolution)
 
     def _check_cost(
@@ -294,13 +344,26 @@ class MarketDataFetcher:
         lib_name: str,
         symbol: str,
         provider: DataProvider,
+        candidate_gaps: list[tuple[datetime, datetime]],
         strategy: CalendarStrategy,
         asset_type: AssetType,
         resolution: Resolution,
         start: datetime,
         end: datetime,
     ) -> None:
-        """Ensure *symbol* has full coverage for [start, end] in the library."""
+        """Ensure *symbol* has full coverage for [start, end] in the library.
+
+        *candidate_gaps* is the provider-free gap discovery from ``get_data``;
+        it is non-empty only when *provider* was resolved. Gaps are re-detected
+        under the per-symbol lock with the provider so the lifecycle-bound
+        bootstrap (ref API / discovery) can clamp the window to the symbol's
+        listed lifetime — dropping candidate gaps that precede the IPO or
+        follow delisting — before anything is fetched.
+        """
+        if not candidate_gaps:
+            logger.info("core.full_coverage", symbol=symbol)
+            return
+
         with self._storage.lock_symbol(lib_name, symbol):
             gaps = self._symbol_gaps(
                 lib_name, symbol, provider, asset_type, resolution, start, end
@@ -451,10 +514,7 @@ def _validate_inputs(
     start: datetime,
     end: datetime,
 ) -> None:
-    if (
-        asset_type is AssetType.INDEX_US
-        and resolution is not Resolution.ONE_DAY
-    ):
+    if asset_type is AssetType.INDEX_US and resolution is not Resolution.ONE_DAY:
         raise ValueError("index_us supports only resolution 1d")
     if asset_type is AssetType.OPTIONS:
         raise ValueError("options datasets use OptionsDataFetcher")
@@ -512,19 +572,23 @@ def _aggregate_bars(df: pd.DataFrame, resolution: Resolution) -> pd.DataFrame:
     if pd.Timedelta(raw_spacing) >= target_td:
         return df
 
-    resampled = df.resample(target_freq).agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "volume": "sum",
-    })
+    resampled = df.resample(target_freq).agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+    )
     # Drop any bins that are all-NaN (gaps between sessions)
     resampled = resampled.dropna(subset=["close"])
     return resampled
 
 
-def _snap_to_grid(df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resolution) -> pd.DataFrame:
+def _snap_to_grid(
+    df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resolution
+) -> pd.DataFrame:
     """Snap provider timestamps to the calendar grid.
 
     Providers return bars at timestamps that may not match the grid convention:
@@ -541,7 +605,11 @@ def _snap_to_grid(df: pd.DataFrame, grid: pd.DatetimeIndex, resolution: Resoluti
         grid_dates = {ts.normalize(): ts for ts in grid}
         new_index = []
         for ts in df.index:
-            normalized = ts.tz_convert("UTC").normalize() if ts.tz is not None else pd.Timestamp(ts).tz_localize("UTC").normalize()
+            normalized = (
+                ts.tz_convert("UTC").normalize()
+                if ts.tz is not None
+                else pd.Timestamp(ts).tz_localize("UTC").normalize()
+            )
             grid_ts = grid_dates.get(normalized)
             new_index.append(grid_ts if grid_ts is not None else ts)
         df.index = pd.DatetimeIndex(new_index)
@@ -607,9 +675,7 @@ def _align_symbols(per_symbol: dict[str, pd.DataFrame]) -> pd.DataFrame:
         # returning a bare, column-less frame (e.g. weekend-only requests).
         return pd.DataFrame(
             index=pd.DatetimeIndex([], tz="UTC"),
-            columns=pd.MultiIndex.from_product(
-                [list(per_symbol), list(OHLCV_COLUMNS)]
-            ),
+            columns=pd.MultiIndex.from_product([list(per_symbol), list(OHLCV_COLUMNS)]),
         )
 
     aligned: dict[str, pd.DataFrame] = {}
