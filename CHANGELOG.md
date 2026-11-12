@@ -3,6 +3,61 @@
 All notable changes to fin3 are documented here. Versions follow 0.x minor
 bumps for new features; dates are UTC.
 
+## 0.4.1 — 2026-11-11
+
+### Fixed
+
+- **Storage-only reads no longer require provider configuration** (issue #12):
+  `MarketDataFetcher.get_data` over a fully covered range now returns the
+  stored frame with an empty provider registry — no provider configured, no
+  provider extra installed, zero provider network calls. Provider resolution
+  moved to gap-fill time: a partially covered range without a configured
+  provider raises the same `ConfigurationError` (naming the provider and the
+  fix) only when a fetch would actually occur. `ProviderRegistry` validates
+  configured names eagerly but instantiates providers lazily on first
+  `get`/`get_chain`, so constructing a `MarketDataFetcher` never imports an
+  optional provider SDK — a configured provider whose extra is missing
+  (e.g. `databento`) now fails at first use instead of at construction.
+  Regression tests in `tests/test_core.py` (`TestStorageOnlyReads`,
+  `TestRegistryLazyInstantiation`).
+- **EODHD options readback suite now fails closed at its named storage
+  resolution** (issue #10): the entry gate announces the physical target
+  (`resolution=explicit-test-bucket`, `consumer_defaults_verified=false`,
+  backend/endpoint/bucket/arctic library) before any check and hard-fails
+  — as a setup error, never a skip — on an absent, invalid, or mismatched
+  artifact (root, coverage endpoints, coverage length, request
+  accounting). The finlab boundary check is relabeled an **owned-bucket
+  override** (consumer defaults are not verified anywhere in the suite)
+  and hard-fails on a nonzero child exit, malformed payloads, no-data,
+  target mismatch, or digest/day-count mismatch without echoing raw child
+  output. Offline regressions in `tests/test_eodhd_readback.py`.
+
+### Changed
+
+- **Root-scope options extraction now walks the underlying-filtered `/eod`
+  grid** (issue #9): `contracts=None` extracts the chain-level grid with
+  expiration → right → strike partitioning and a two-request ceiling probe
+  per query, instead of one history request per enumerated contract;
+  explicit `contracts` selections keep per-contract histories and reference
+  verification. Whole-root cost now follows grid row density under the
+  page size: SHY's full multi-year root (2023-12-29…2026-11-06) published
+  in 753 requests, where the retired per-contract algorithm's own floor
+  for the same root was ≥ 2,649 requests (2,646-contract inventory).
+  Budget failures carry proven lower bounds sized by sibling and child
+  re-read arithmetic (`requests_used` reports the proven total; the
+  report/manifest carries actual spend).
+
+### Fixed
+
+- Chain session labels: a stale parsed id made every row of a multi-date
+  normalization call inherit the last row's non-session flag.
+
+### Performance
+
+- `OptionsDataFetcher` merge computes per-as-of counts once per run
+  (`value_counts`) instead of one full-frame scan per requested date
+  (required for multi-year root publications).
+
 ## 0.4.0 — 2026-11-07
 
 ### Added

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fin3"
-version = "0.4.0"
+version = "0.4.1"
 description = "Declarative financial time-series data library for VectorBT Pro backtesting"
 readme = "README.md"
 requires-python = ">=3.11"
