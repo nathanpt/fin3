@@ -107,40 +107,68 @@ source is unverified.
   pacing) applies per run. A `RequestLimitExceededError` leaves the old
   snapshot untouched — raise the cap explicitly if you need a wider
   extraction; fin3 never substitutes a partial chain.
-- Source queries: max-expiration discovery (one page), an over-bound
-  guard query, full reference enumeration over `[start, max]`, then
-  exhausted per-contract `/eod` histories. A query crossing the source's
-  documented offset ceiling (10,000 records) is split by expiration,
-  then right, then strike range — never truncated. A single contract
-  history exceeding the ceiling fails explicitly.
+- Source queries (root scope): max-expiration discovery (one page), an
+  over-bound reference guard, one single-page reference enumeration of the
+  full inventory over `[start, max]` (inventory counting only — rows are
+  **not** fetched per contract), a grid-beyond-reference guard (one page,
+  `exp_date_from = max + 1 day`), then **one underlying-filtered `/eod`
+  grid walk** over the entire `[start, max]` window. The grid walk queries
+  the chain-level `/eod` endpoint with `exp_date_from`/`exp_date_to`
+  bounds and exhausts every partitioned leaf locally, slicing rows by ID
+  labels; grid rows whose contracts lack reference entries are retained,
+  and the reference inventory count stays an inventory count, never an
+  expected row count. A query crossing the source's documented offset
+  ceiling (10,000 records) is split by expiration, then right, then
+  strike range — never truncated; an exhausted-but-unsplittable leaf
+  fails explicitly. Grid rows are assembled disjointly (`verify_integrity`)
+  and a confirmed overlap fails closed.
+- Source queries (contract scope): per-contract reference verification
+  plus exhausted per-contract `/eod` histories, unchanged.
+- Pager: every query is exhausted through `links.next`; a query that does
+  not fit under the offset ceiling is detected in two requests by probing
+  the last legal page boundary directly, so a saturated query is
+  recognized without walking all of its pages. A terminal cached tail is
+  reused without a second fetch; its exact intervening pages are walked
+  and reserved up front.
 
 ### Request budget economics
 
-Root-scope cost is proportional to the number of **reference contracts
-with `exp_date >= start`**, not to the window length: a complete as-of
-chain for one day must include far-dated contracts (a LEAPS contract
-expiring in 2028 trades on 2025-06-10), so a one-day window backfill
-costs essentially the same as a long window for the same root. The
-budget is spent as: discovery + guard (2 requests) + reference
-enumeration (at least one page per 1,000 candidates, plus re-fetches
-where the source ceiling forces filter partitioning) + at least one
-history request per enumerated contract.
+Root-scope cost is proportional to the number of **grid partitions the
+source ceiling forces fin3 to walk**, not to the number of reference
+contracts: a complete as-of chain for one day must include far-dated
+contracts (a LEAPS contract expiring in 2028 trades on 2025-06-10), so
+a one-day window backfill costs essentially the same as a long window
+for the same root. The budget is spent as: discovery + reference guard +
+grid guard (3 single-page requests) + one reference-enumeration page
+walk (inventory only) + the `/eod` grid walk, whose page count follows
+the row density of each expiry/right/strike leaf under the 1,000-row
+page size. A query whose first page is full with a continuation is
+probed at the ceiling boundary directly: two requests decide whether the
+whole query fits, so wide-but-fitting leaves cost one extra empty
+probe, and saturated queries are rejected before their middle pages are
+downloaded.
 
-Because the source exposes no total-count metadata, fin3 cannot know
-the full requirement up front. It fails fast instead: once reference
-rows already seen plus requests already spent exceed the cap, the run
-raises `RequestLimitExceededError` with the observed lower bound
-(`EODHD run needs at least N requests; cap M`) after roughly three
-requests. In contract scope, a selection larger than the cap fails
-before any HTTP. Raise the cap to at least the reported bound (and
-expect the true root-wide total to be higher), or pass an explicit
-`contracts` selection for a bounded pull. Observed scale (live, 2026-11-07):
-one root-day for a mid-sized ETF root was 416 contracts ≈ 419 requests,
-while AAPL for one day enumerated 21,704 reference contracts (expirations
-2025-06-10…2029-01-19, ceiling-partitioned across 58 enumeration requests)
-→ a full one-day root backfill needs at least ~21,762 requests. Budget
-accordingly; the provider states each root's observed lower bound after
-~3 requests.
+Because the source exposes no total-count metadata, fin3 cannot know the
+full requirement up front. It fails fast on proven lower bounds instead:
+before every request the provider reserves what that query provably
+still needs (its own page floor — including the ceiling probe's
+two-request lookahead — plus the pending sibling partitions and the
+future grid bounds), and after a ceiling it reserves
+`max(2 children, ⌈proven rows / page size⌉)` to re-read the parent under
+its disjoint children. A breach raises `RequestLimitExceededError` with
+the proven bound (`EODHD run needs at least N requests; cap M`) — the
+bound is a conservative local minimum, never a total-cost prediction,
+and `requests_used` on that exception carries the proven total rather
+than the attempted GET count (actual paid work is `requests_used` on the
+report/manifest). In contract scope, a selection larger than the cap
+still fails before any HTTP. Raise the cap to at least the reported
+bound, or pass an explicit `contracts` selection for a bounded pull.
+Historical scale note (live, 2026-11-07, under the retired per-contract
+algorithm): one root-day for a mid-sized ETF root enumerated 416
+reference contracts ≈ 419 requests, while AAPL for one day enumerated
+21,704 reference contracts — those figures describe the retired 1:1
+economics and are not predictions for the grid walk. Budget the grid
+path from its own reported lower bounds.
 
 ## No-data results
 

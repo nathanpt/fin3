@@ -21,7 +21,7 @@ from typing import Any, Callable
 import pandas as pd
 import pytest
 
-from fin3.config.settings import EodhdOptionsConfig
+from fin3.config.settings import ClientConfig, EodhdOptionsConfig
 from fin3.exceptions import (
     ConfigurationError,
     ProviderError,
@@ -30,10 +30,25 @@ from fin3.exceptions import (
     RequestLimitExceededError,
 )
 from fin3.options_schemas import CHAIN_REPORT_ATTR
+from fin3.storage.arctic import ArcticStorage
+from fin3.storage.arctic import _suppress_blockmanager_warning
 from fin3.providers.eodhd_options import EodhdOptionsProvider
 
 BASE = "https://eodhd.com/api/mp/unicornbay/options"
 SECRET = "SECRET-TEST-KEY-0001"
+
+
+@pytest.fixture
+def options_config() -> ClientConfig:
+    """Offline options fetcher config against the shared LMDB fixture."""
+    from fin3.config.settings import ClientConfig, MinioConfig
+
+    return ClientConfig(
+        minio=MinioConfig(endpoint="localhost:9000", access_key="a", secret_key="b"),
+        providers={},
+        EODHD_API_KEY=None,
+        _env_file=None,
+    )
 
 
 def contract_attrs(
@@ -668,7 +683,8 @@ class TestSaturationPartition:
 
         simulator, _, _ = standard_universe()
         # A 6-row contract history: two full pages, the second page's
-        # continuation crossing the patched ceiling.
+        # continuation crossing the patched ceiling. Explicit selections
+        # keep the per-contract exhaustion semantics.
         simulator.eod["SHY261120C00091000"] = [
             eod_row("SHY261120C00091000", f"2026-11-{day:02d}")
             for day in (2, 3, 4, 5, 6, 7)
@@ -676,6 +692,29 @@ class TestSaturationPartition:
         monkeypatch.setattr(module, "_OFFSET_CEILING", 2)
         provider = make_provider(monkeypatch, simulator)
         with pytest.raises(ProviderError, match="exceeds the source query ceiling"):
+            provider.fetch_history(
+                "SHY",
+                date(2026, 11, 2),
+                date(2026, 11, 7),
+                contracts=["SHY261120C00091000"],
+            )
+
+    def test_indivisible_grid_partition_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fin3.providers.eodhd_options as module
+
+        simulator, _, _ = standard_universe()
+        # One contract whose six grid rows share one expiry/right/strike:
+        # the saturated strike leaf cannot split further, so the root grid
+        # walk fails closed instead of returning truncated rows.
+        simulator.eod["SHY261120C00091000"] = [
+            eod_row("SHY261120C00091000", f"2026-11-{day:02d}")
+            for day in (2, 3, 4, 5, 6, 7)
+        ]
+        monkeypatch.setattr(module, "_OFFSET_CEILING", 2)
+        provider = make_provider(monkeypatch, simulator)
+        with pytest.raises(ProviderError, match="grid partition cannot be exhausted"):
             provider.fetch_history("SHY", date(2026, 11, 2), date(2026, 11, 7))
 
 
@@ -814,39 +853,43 @@ class TestRequestBudget:
         provider = make_provider(monkeypatch, simulator, cap=3)
         with pytest.raises(RequestLimitExceededError) as excinfo:
             provider.fetch_history("SHY", START, END)
-        # discovery + guard + enumeration page 0 (2 rows seen); the two
-        # seen rows each imply a future history request, so the lower
-        # bound fires at 3 + 2 = 5 > 3 instead of burning the cap on
-        # further enumeration pages.
+        # The discovery GET plus the proven four further requests (max
+        # guard, reference first page, grid guard, at least one grid
+        # page) form the lower bound 1 + 4 = 5 > 3, which fires before
+        # any deeper enumeration or grid page burns the cap.
         assert "needs at least 5 requests; cap 3" in str(excinfo.value)
         assert excinfo.value.requests_used == 5
         assert excinfo.value.max_requests == 3
-        assert len(simulator.calls) == 3  # discovery + guard + enum page 0
+        assert len(simulator.calls) == 1  # discovery only; cap preserved
 
-    def test_lower_bound_preflight_message(
+    def test_lower_bound_pre_http_message(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         simulator, _, _ = standard_universe()
         provider = make_provider(monkeypatch, simulator, cap=5)
         with pytest.raises(RequestLimitExceededError) as excinfo:
             provider.fetch_history("SHY", START, END)
-        # discovery + guard + two enumeration pages precede the reserve(3)
-        # for the three EOD histories: 4 + 3 = 7 > 5.
+        # Three GETs spent (discovery + guard + enumeration page 0); the
+        # full first page's distant-probe lookahead proves at least two
+        # further GETs for that query, and the reference walk reserves
+        # two future grid requests: 3 + 2 + 2 = 7 > 5.
         assert "needs at least 7 requests; cap 5" in str(excinfo.value)
         assert excinfo.value.requests_used == 7
+        assert len(simulator.calls) == 3
 
     def test_wide_root_fails_fast_with_lower_bound(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Regression: finlab options-feed-backfill-problem (2026-11-07).
 
-        A root whose very first enumeration page already implies more
-        history requests than the whole cap allows must fail at the first
-        page with the lower bound, not burn the entire cap walking
-        reference pages (AAPL one-day shape).
+        A wide root must fail on a proven lower bound well before the cap
+        is burned — after three GETs here — with the bound derived from
+        the partition walker's distant-probe lookahead plus its pending
+        and future-grid bounds, never from one request per enumerated
+        contract (the obsolete 1:1 bound was 13).
         """
         refs = [
-            ref_row(f"SHY261120{right}{strike:08d}")
+            ref_row(f"SHY261120{right}{strike * 1000:08d}")
             for right in "CP"
             for strike in range(50, 90)
         ]
@@ -854,9 +897,11 @@ class TestRequestBudget:
         provider = make_provider(monkeypatch, simulator, page_size=10, cap=5)
         with pytest.raises(RequestLimitExceededError) as excinfo:
             provider.fetch_history("SHY", START, END)
-        # discovery + guard + page 0 (10 rows seen): 3 + 10 = 13 > 5.
-        assert "needs at least 13 requests; cap 5" in str(excinfo.value)
-        assert excinfo.value.requests_used == 13
+        # discovery + guard + page 0 (three GETs spent); the full first
+        # page's distant-probe lookahead proves at least two further GETs
+        # for the query plus two future grid requests: 3 + 2 + 2 = 7 > 5.
+        assert "needs at least 7 requests; cap 5" in str(excinfo.value)
+        assert excinfo.value.requests_used == 7
         assert len(simulator.calls) == 3
 
     def test_budget_error_not_ceiling_during_partition_recursion(
@@ -866,15 +911,15 @@ class TestRequestBudget:
 
         A ceiling hit inside the partition cascade must never surface as
         the internal ceiling exception. When budget exhaustion happens in
-        a nested enumeration call that is *handling* such a ceiling, the
-        terminal shows the ceiling as chained traceback context (which can
-        read like "nested retries"); the raised class is the budget error.
+        a walker that is *handling* such a ceiling, the terminal shows
+        the ceiling as chained traceback context (which can read like
+        "nested retries"); the raised class is the budget error.
         """
         import fin3.providers.eodhd_options as module
 
         # Three expirations x call/put: with the ceiling at one page, the
-        # partition cascade needs >10 requests, so the budget exhausts
-        # mid-recursion (before any per-contract history).
+        # walker's proven child reread bound exceeds the remaining cap
+        # mid-walk, before any per-contract history exists.
         refs = [
             ref_row("SHY261120C00091000"),
             ref_row("SHY261120P00096000"),
@@ -885,11 +930,11 @@ class TestRequestBudget:
         ]
         simulator = SourceSimulator(refs, {})
         monkeypatch.setattr(module, "_OFFSET_CEILING", 1)
-        provider = make_provider(monkeypatch, simulator, cap=10)
+        provider = make_provider(monkeypatch, simulator, cap=8)
         with pytest.raises(RequestLimitExceededError) as excinfo:
             provider.fetch_history("SHY", START, END)
         assert type(excinfo.value) is RequestLimitExceededError
-        assert len(simulator.calls) <= 10
+        assert len(simulator.calls) <= 8
 
     def test_contract_scope_reserves_selection_before_http(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1171,3 +1216,532 @@ class TestInputValidation:
         with pytest.raises(ValueError, match="positive integer"):
             provider.fetch_history("SHY", START, END, max_requests=2.5)
         assert simulator.calls == []
+
+
+class TestProbeBoundaries:
+    """Pager ceiling-probe boundaries exercised directly on _paged_query."""
+
+    @staticmethod
+    def _paged(
+        monkeypatch: pytest.MonkeyPatch,
+        rows: list[dict[str, Any]],
+        *,
+        ceiling: int,
+        page_size: int = 2,
+        cap: int = 40,
+    ) -> tuple[list[dict[str, Any]], SourceSimulator]:
+        import fin3.providers.eodhd_options as module
+
+        contracts = sorted({row["attributes"]["contract"] for row in rows})
+        eod: dict[str, list[dict[str, Any]]] = {contract: [] for contract in contracts}
+        for row in rows:
+            eod[row["attributes"]["contract"]].append(row)
+        simulator = SourceSimulator([ref_row(c) for c in contracts], eod)
+        monkeypatch.setattr(module, "_OFFSET_CEILING", ceiling)
+        provider = make_provider(
+            monkeypatch, simulator, page_size=page_size, cap=cap
+        )
+        params = [("filter[underlying_symbol]", "SHY"), ("sort", "exp_date")]
+        result = provider._paged_query(
+            path=module._PATH_EOD,
+            params=params,
+            budget=module._RequestBudget(cap, 0.0),
+            compact=True,
+            row_validator=provider._eod_row_validator(dict(params)),
+            probe_ceiling=True,
+        )
+        return result, simulator
+
+    @staticmethod
+    def _offsets(simulator: SourceSimulator) -> list[int]:
+        return [
+            int(
+                urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)[
+                    "page[offset]"
+                ][0]
+            )
+            for url in simulator.calls
+        ]
+
+    def test_terminal_first_page_makes_no_tail_get(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [eod_row("SHY261120C00091000", "2026-11-06")]
+        result, simulator = self._paged(monkeypatch, rows, ceiling=10)
+        assert [r["id"] for r in result] == ["SHY261120C00091000-2026-11-06"]
+        assert self._offsets(simulator) == [0]
+
+    def test_immediate_tail_fetch_is_ordinary_and_terminal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Ceiling 3 with page size 2 puts the tail at offset 2, exactly the
+        # first page's continuation: one ordinary GET, no probe overhead.
+        rows = [
+            eod_row("SHY261120C00091000", "2026-11-04"),
+            eod_row("SHY261120C00092000", "2026-11-05"),
+            eod_row("SHY261120P00096000", "2026-11-06"),
+        ]
+        result, simulator = self._paged(monkeypatch, rows, ceiling=3)
+        assert len(result) == 3
+        assert self._offsets(simulator) == [0, 2]
+
+    def test_distant_probe_walks_middles_and_reuses_cached_tail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Ceiling 4 with page size 2 puts the tail at offset 4 while the
+        # first continuation is 2: the probe proves the middle at offset 2
+        # is required, and the cached tail is never re-fetched.
+        rows = [
+            eod_row("SHY261120C00091000", f"2026-11-{day:02d}")
+            for day in (2, 3, 4, 5)
+        ] + [eod_row("SHY261120P00096000", "2026-11-06")]
+        result, simulator = self._paged(monkeypatch, rows, ceiling=4)
+        assert len(result) == 5
+        assert self._offsets(simulator) == [0, 4, 2]
+
+    def test_empty_tail_continues_the_ordinary_walk(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rows = [
+            eod_row("SHY261120C00091000", "2026-11-05"),
+            eod_row("SHY261120C00092000", "2026-11-06"),
+            eod_row("SHY261120P00096000", "2026-11-07"),
+        ]
+        result, simulator = self._paged(monkeypatch, rows, ceiling=4)
+        assert len(result) == 3
+        # The empty probe at T supplies no row bound; the walk ends on the
+        # short terminal page and never touches T again.
+        assert self._offsets(simulator) == [0, 4, 2]
+
+    def test_full_tail_at_boundary_raises_ceiling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fin3.providers.eodhd_options as module
+
+        rows = [eod_row("SHY261120C00091000", f"2026-11-{day:02d}") for day in (4, 5, 6, 7, 8)]
+        contracts = sorted({r["attributes"]["contract"] for r in rows})
+        eod = {c: [r for r in rows if r["attributes"]["contract"] == c] for c in contracts}
+        simulator = SourceSimulator([ref_row(c) for c in contracts], eod)
+        monkeypatch.setattr(module, "_OFFSET_CEILING", 3)
+        provider = make_provider(monkeypatch, simulator, page_size=2, cap=40)
+        params = [("filter[underlying_symbol]", "SHY"), ("sort", "exp_date")]
+        with pytest.raises(module._QueryCeiling) as excinfo:
+            provider._paged_query(
+                path=module._PATH_EOD,
+                params=params,
+                budget=module._RequestBudget(40, 0.0),
+                compact=True,
+                row_validator=provider._eod_row_validator(dict(params)),
+                probe_ceiling=True,
+            )
+        # Tail at T == P is full with a continuation: rows past the ceiling
+        # are proven without downloading them.
+        assert excinfo.value.minimum_rows == 4
+
+    def test_page_size_not_dividing_ceiling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Ceiling 10, page 3: tail at 9; the ordinary walk terminates one
+        # page early and the redundant empty probe is ignored.
+        rows = [
+            eod_row("SHY261120C00091000", f"2026-11-{day:02d}")
+            for day in (4, 5, 6)
+        ] + [eod_row("SHY261120P00096000", "2026-11-07")]
+        result, simulator = self._paged(monkeypatch, rows, ceiling=10, page_size=3)
+        assert len(result) == 4
+        # The ordinary walk terminates on the short page; the redundant
+        # empty probe at 9 is never re-fetched.
+        assert self._offsets(simulator) == [0, 9, 3]
+
+    def test_exact_page_boundary_exhaustion_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        contract = "SHY261120C00091000"
+        rows = [eod_row(contract, f"2026-11-{day:02d}") for day in range(2, 13)]
+        result, simulator = self._paged(monkeypatch, rows, ceiling=10, page_size=10)
+        assert len(result) == 11
+        assert self._offsets(simulator) == [0, 10]
+
+    def test_terminal_middle_page_is_inconsistent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fin3.providers.eodhd_options as module
+
+        rows = [
+            eod_row("SHY261120C00091000", "2026-11-05"),
+            eod_row("SHY261120C00092000", "2026-11-06"),
+            eod_row("SHY261120P00096000", "2026-11-06"),
+        ]
+        contracts = sorted({r["attributes"]["contract"] for r in rows})
+        eod = {c: [r for r in rows if r["attributes"]["contract"] == c] for c in contracts}
+        simulator = SourceSimulator([ref_row(c) for c in contracts], eod)
+        monkeypatch.setattr(module, "_OFFSET_CEILING", 4)
+        provider = make_provider(monkeypatch, simulator, page_size=2, cap=40)
+
+        def phantom_tail(payload: dict[str, Any], url: str) -> dict[str, Any]:
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            if (
+                urllib.parse.urlsplit(url).path.endswith("/eod")
+                and qs["page[offset]"][0] == "4"
+                and qs["page[limit]"][0] == "2"
+            ):
+                # Contradictory source: a nonempty terminal tail at T while
+                # the real rows end inside the middle page.
+                return {
+                    "meta": {"offset": 4, "limit": 2, "fields": []},
+                    "data": [
+                        eod_row("SHY261120C00091000", "2026-11-06"),
+                        eod_row("SHY261120C00091000", "2026-11-06"),
+                    ],
+                    "links": {"next": None},
+                }
+            return payload
+
+        wrap_transport(monkeypatch, simulator, phantom_tail)
+        params = [("filter[underlying_symbol]", "SHY"), ("sort", "exp_date")]
+        with pytest.raises(ProviderError, match="inconsistent with ceiling probe"):
+            provider._paged_query(
+                path=module._PATH_EOD,
+                params=params,
+                budget=module._RequestBudget(40, 0.0),
+                compact=True,
+                row_validator=provider._eod_row_validator(dict(params)),
+                probe_ceiling=True,
+            )
+
+    def test_repeated_full_page_stalls(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fin3.providers.eodhd_options as module
+
+        contract = "SHY261120C00091000"
+        row = eod_row(contract, "2026-11-06")
+        simulator = SourceSimulator([ref_row(contract)], {contract: [row]})
+        monkeypatch.setattr(module, "_OFFSET_CEILING", 10)
+        provider = make_provider(monkeypatch, simulator, page_size=2, cap=40)
+
+        def loop(payload: dict[str, Any], url: str) -> dict[str, Any]:
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            offset = int(qs["page[offset]"][0])
+            pairs = [(k, v[0]) for k, v in qs.items() if k.startswith("filter[") or k == "sort"]
+            pairs.extend([("page[offset]", str(offset + 2)), ("page[limit]", "2")])
+            return {
+                "meta": {"offset": offset, "limit": 2, "fields": []},
+                "data": [row, row],
+                "links": {
+                    "next": (
+                        f"{BASE}/eod?{urllib.parse.urlencode(pairs)}"
+                    )
+                },
+            }
+
+        wrap_transport(monkeypatch, simulator, loop)
+        params = [("filter[underlying_symbol]", "SHY"), ("sort", "exp_date")]
+        with pytest.raises(ProviderError, match="repeated page at a different offset"):
+            provider._paged_query(
+                path=module._PATH_EOD,
+                params=params,
+                budget=module._RequestBudget(40, 0.0),
+                compact=True,
+                row_validator=provider._eod_row_validator(dict(params)),
+                probe_ceiling=True,
+            )
+
+
+class TestGridExtraction:
+    """Root-grid extraction: bounded cost, retention, and inventory."""
+
+    def test_cap_eight_multi_year_grid_completes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        start = date(2023, 12, 29)
+        end = date(2026, 11, 6)
+        refs = [
+            ref_row(f"SHY261120{right}{strike * 1000:08d}")
+            for right in "CP"
+            for strike in range(50, 75)
+        ]
+        eod: dict[str, list[dict[str, Any]]] = {}
+        for reference in refs:
+            contract = reference["attributes"]["contract"]
+            eod[contract] = [
+                eod_row(contract, "2024-01-02"),
+                eod_row(contract, "2026-11-06"),
+            ]
+        # One enumerated candidate carries no history rows at all.
+        no_history = refs[-1]["attributes"]["contract"]
+        del eod[no_history]
+        # One valid grid contract is absent from the reference inventory
+        # but sits inside the checked expiry interval.
+        orphan = "SHY261120C00925000"
+        eod[orphan] = [
+            eod_row(orphan, "2024-01-02"),
+            eod_row(
+                orphan,
+                "2026-11-06",
+                bid=0.0,
+                ask=0.01,
+                volume=0,
+                volatility=2.0228,
+            ),
+        ]
+        simulator = SourceSimulator(refs, eod)
+        provider = make_provider(monkeypatch, simulator, page_size=1000, cap=8)
+        frame = provider.fetch_history("SHY", start, end)
+        expected_keys = {
+            (pd.Timestamp(contract_row["id"][len(contract) + 1:], tz="UTC"), contract)
+            for contract, history in eod.items()
+            for contract_row in history
+        }
+        actual_keys = set(zip(frame.index.get_level_values("as_of"), frame.index.get_level_values("contract")))
+        assert actual_keys == expected_keys
+        assert len(frame) == 100
+        report = report_of(frame)
+        assert report["scope"] == "root"
+        assert report["selected_contracts"] is None
+        assert report["reference_contract_count"] == 50  # orphan excluded
+        assert report["extraction_complete"] is True
+        assert report["reason"] is None
+        assert report["requests_used"] == len(simulator.calls)
+        assert report["requests_used"] <= 8
+        assert (frame["multiplier"].isna()).all()
+        worthless = frame.loc[
+            (pd.Timestamp("2026-11-06", tz="UTC"), orphan)
+        ]
+        assert float(worthless["bid"]) == 0.0
+        assert float(worthless["ask"]) == 0.01
+        assert bool(worthless["has_zero_bid"])
+        assert float(worthless["implied_volatility"]) == 2.0228
+        assert int(worthless["volume"]) == 0
+        # The no-history reference never appears, the orphan does.
+        assert no_history not in set(frame.index.get_level_values("contract"))
+        assert orphan in set(frame.index.get_level_values("contract"))
+
+    def test_grid_partitions_cover_midpoint_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fin3.providers.eodhd_options as module
+
+        # Two expirations: bisection splits between them; rows on both
+        # sides of the midpoint appear exactly once.
+        refs = [
+            ref_row("SHY261120C00091000"),
+            ref_row("SHY270115C00092000"),
+        ]
+        eod = {
+            "SHY261120C00091000": [eod_row("SHY261120C00091000", "2026-11-06")],
+            "SHY270115C00092000": [eod_row("SHY270115C00092000", "2026-11-06")],
+        }
+        simulator = SourceSimulator(refs, eod)
+        monkeypatch.setattr(module, "_OFFSET_CEILING", 1)
+        provider = make_provider(monkeypatch, simulator, page_size=2, cap=200)
+        frame = provider.fetch_history(
+            "SHY", date(2026, 11, 6), date(2026, 11, 6)
+        )
+        assert sorted(frame.index.get_level_values("contract")) == [
+            "SHY261120C00091000",
+            "SHY270115C00092000",
+        ]
+        assert len(frame) == 2
+
+
+class TestGridCorruption:
+    """Malformed source shapes around the grid walk fail closed."""
+
+    def test_continuation_page_size_mutation_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        simulator, _, _ = standard_universe()
+
+        def resize(payload: dict[str, Any], url: str) -> dict[str, Any]:
+            links = payload.get("links")
+            if links is not None and links.get("next") is not None:
+                links["next"] = links["next"].replace(
+                    "page%5Blimit%5D=2", "page%5Blimit%5D=3"
+                )
+            return payload
+
+        provider = make_provider(monkeypatch, simulator)
+        wrap_transport(monkeypatch, simulator, resize)
+        with pytest.raises(ProviderError, match="page size"):
+            provider.fetch_history("SHY", START, END)
+
+    def test_grid_rows_without_reference_inventory_fail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        contract = "SHY261120C00091000"
+        simulator = SourceSimulator(
+            [], {contract: [eod_row(contract, "2026-11-06")]}
+        )
+        provider = make_provider(monkeypatch, simulator, cap=10)
+        with pytest.raises(
+            ProviderError, match="grid has rows without reference inventory"
+        ):
+            provider.fetch_history("SHY", START, END)
+
+    def test_grid_maximum_beyond_reference_maximum_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        simulator, _, _ = standard_universe()
+
+        def beyond(payload: dict[str, Any], url: str) -> dict[str, Any]:
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            if (
+                urllib.parse.urlsplit(url).path.endswith("/eod")
+                and qs.get("filter[exp_date_from]", [""])[0] == "2026-11-28"
+            ):
+                return {
+                    "meta": {"offset": 0, "limit": 1, "fields": []},
+                    "data": [
+                        eod_row("SHY261204C00091000", "2026-11-06",
+                                underlying="SHY"),
+                    ],
+                    "links": {"next": None},
+                }
+            return payload
+
+        provider = make_provider(monkeypatch, simulator)
+        wrap_transport(monkeypatch, simulator, beyond)
+        with pytest.raises(
+            ProviderError, match="grid maximum exceeds reference maximum"
+        ):
+            provider.fetch_history("SHY", START, END)
+
+    def test_ignored_strike_partition_filter_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fin3.providers.eodhd_options as module
+
+        simulator = TestSaturationPartition.saturated_universe()
+        monkeypatch.setattr(module, "_OFFSET_CEILING", 1)
+        provider = make_provider(monkeypatch, simulator)
+
+        def ignore_strikes(payload: dict[str, Any], url: str) -> dict[str, Any]:
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            if "filter[strike_from]" in qs:
+                # The source pretends the strike partition does not narrow.
+                return {
+                    "meta": {
+                        "offset": int(qs["page[offset]"][0]),
+                        "limit": int(qs["page[limit]"][0]),
+                        "fields": [],
+                    },
+                    "data": [ref_row("SHY261120C00096000")],
+                    "links": {"next": None},
+                }
+            return payload
+
+        wrap_transport(monkeypatch, simulator, ignore_strikes)
+        with pytest.raises(ProviderError, match="violates the sent strike"):
+            provider.fetch_history(
+                "SHY", date(2026, 11, 20), date(2026, 11, 20)
+            )
+
+
+class TestGridStoragePublication:
+    """Real provider through real LMDB publication and no-mutation reads."""
+
+    @staticmethod
+    def _grid_provider(
+        monkeypatch: pytest.MonkeyPatch, simulator: SourceSimulator, *,
+        page_size: int = 2, cap: int = 200,
+    ) -> EodhdOptionsProvider:
+        return make_provider(monkeypatch, simulator, page_size=page_size, cap=cap)
+
+    def test_root_backfill_publishes_multi_day_coverage(
+        self, storage: ArcticStorage, options_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fin3.options import OptionsDataFetcher
+
+        simulator = standard_universe()[0]
+        # A grid-only contract absent from the reference inventory.
+        simulator.eod["SHY261120C00925000"] = [
+            eod_row("SHY261120C00925000", "2026-11-06"),
+        ]
+        provider = self._grid_provider(monkeypatch, simulator)
+        monkeypatch.setattr(
+            OptionsDataFetcher, "_resolve_provider", lambda self: provider
+        )
+        fetcher = OptionsDataFetcher(options_config, storage=storage)
+        fetcher.backfill("SHY", date(2026, 11, 5), date(2026, 11, 7))
+        day5 = fetcher.read_chain("SHY", date(2026, 11, 5))
+        day6 = fetcher.read_chain("SHY", date(2026, 11, 6))
+        day7 = fetcher.read_chain("SHY", date(2026, 11, 7))
+        # Per-day populations differ and match the grid exactly.
+        assert len(day5.data) == 1  # C91's 11-05 row only
+        assert len(day6.data) == 4  # C91, P96, C92, and the grid orphan
+        assert len(day7.data) == 1  # C91's 11-07 row only
+        assert "SHY261120C00925000" in set(day6.data.index.get_level_values("contract"))
+        assert str(day6.data.index.get_level_values("as_of").dtype) == (
+            "datetime64[ns, UTC]"
+        )
+        assert day6.data["multiplier"].isna().all()
+        manifest = day6.manifest
+        assert manifest is not None
+        counts = {d.as_of.isoformat(): d.contract_count for d in manifest.days}
+        assert counts == {
+            "2026-11-05": 1,
+            "2026-11-06": 4,
+            "2026-11-07": 1,
+        }
+        scopes = {d.scope for d in manifest.days}
+        assert scopes == {"root"}
+
+    def test_failed_backfill_leaves_version_and_timestamp(
+        self, storage: ArcticStorage, options_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fin3.options import OptionsDataFetcher
+        from fin3.exceptions import RequestLimitExceededError
+
+        simulator = standard_universe()[0]
+        provider = self._grid_provider(monkeypatch, simulator, cap=200)
+        monkeypatch.setattr(
+            OptionsDataFetcher, "_resolve_provider", lambda self: provider
+        )
+        fetcher = OptionsDataFetcher(options_config, storage=storage)
+        fetcher.backfill("SHY", date(2026, 11, 5), date(2026, 11, 7))
+        lib = storage.arctic["options-eod-eodhd"]
+        with _suppress_blockmanager_warning():
+            before = lib.read("SHY")
+
+        broke = self._grid_provider(monkeypatch, standard_universe()[0], cap=4)
+        monkeypatch.setattr(
+            OptionsDataFetcher, "_resolve_provider", lambda self: broke
+        )
+        with pytest.raises(RequestLimitExceededError):
+            fetcher.backfill("SHY", date(2026, 11, 5), date(2026, 11, 7))
+        with _suppress_blockmanager_warning():
+            after = lib.read("SHY")
+        assert after.version == before.version
+        assert after.timestamp == before.timestamp
+
+    def test_contract_extract_does_not_demote_root_coverage(
+        self, storage: ArcticStorage, options_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fin3.options import OptionsDataFetcher
+
+        simulator = standard_universe()[0]
+        provider = self._grid_provider(monkeypatch, simulator)
+        monkeypatch.setattr(
+            OptionsDataFetcher, "_resolve_provider", lambda self: provider
+        )
+        fetcher = OptionsDataFetcher(options_config, storage=storage)
+        fetcher.backfill("SHY", date(2026, 11, 5), date(2026, 11, 7))
+        day6 = fetcher.read_chain("SHY", date(2026, 11, 6))
+        manifest = day6.manifest
+        assert manifest is not None
+        assert {d.scope for d in manifest.days} == {"root"}
+        # An explicit selection after a successful root extract keeps the
+        # stored coverage root-scoped.
+        fetcher.backfill(
+            "SHY",
+            date(2026, 11, 6),
+            date(2026, 11, 6),
+            contracts=["SHY261120C00091000"],
+        )
+        again = fetcher.read_chain("SHY", date(2026, 11, 6))
+        scopes = {d.scope for d in again.manifest.days}
+        assert scopes == {"root"}

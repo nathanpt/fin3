@@ -431,16 +431,20 @@ class OptionsDataFetcher:
                 merged[column] = merged[column].astype(base[column].dtype)
 
         # Coverage: requested calendar dates only are recomputed; coverage
-        # for prior days outside the request is preserved as-is.
+        # for prior days outside the request is preserved as-is. Per-as-of
+        # counts are computed once from the unique merged index (same
+        # pattern as _validate_manifest_consistency) instead of one
+        # full-frame scan per requested day.
+        per_day = (
+            merged.index.get_level_values("as_of").value_counts()
+            if not merged.empty
+            else pd.Series(dtype=int)
+        )
         day = start
         new_days: dict[date, ChainDateCoverage] = dict(days)
         while day <= end:
             as_of_ts = pd.Timestamp(day, tz="UTC")
-            if merged.empty:
-                actual = 0
-            else:
-                level = merged.index.get_level_values("as_of")
-                actual = int((level == as_of_ts).sum())
+            actual = int(per_day.get(as_of_ts, 0))
             previous = days.get(day)
             new_days[day] = self._merge_coverage_day(day, actual, previous, report)
             day += timedelta(days=1)

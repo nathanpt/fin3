@@ -16,6 +16,7 @@ column; zero/crossed quotes are retained and flagged.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import socket
@@ -24,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal
@@ -98,7 +99,39 @@ _RIGHT_MAP = {"call": "C", "put": "P"}
 
 
 class _QueryCeiling(Exception):
-    """Internal: a valid continuation would cross the source offset ceiling."""
+    """Internal: a valid continuation would cross the source offset ceiling.
+
+    ``minimum_rows`` is the proven row-count lower bound at the moment the
+    ceiling was detected (rows already under the walked offsets plus the
+    rows of the full page whose continuation crossed) — callers use it to
+    size disjoint partition children.
+    """
+
+    def __init__(self, *, minimum_rows: int) -> None:
+        super().__init__(
+            f"documented continuation would exceed the source offset "
+            f"ceiling (>= {minimum_rows} rows)"
+        )
+        self.minimum_rows = minimum_rows
+
+
+@dataclass(frozen=True)
+class _QueryPartition:
+    """One disjoint filtered-query partition of a root's row space."""
+
+    expiry_from: date
+    expiry_to: date
+    source_type: Literal["call", "put"] | None = None
+    strike_from: int | None = None
+    strike_to: int | None = None
+
+
+@dataclass(frozen=True)
+class _QueryPage:
+    """One validated source page: its rows plus the parsed continuation."""
+
+    data: list[dict[str, Any]]
+    next_offset: int | None
 
 
 class _UnknownUnderlying(ProviderError):
@@ -374,89 +407,236 @@ class EodhdOptionsProvider(ChainProvider):
         row_validator: Callable[[dict[str, Any]], None],
         limit: int | None = None,
         single_page: bool = False,
-        on_page: Callable[[int], None] | None = None,
+        probe_ceiling: bool = False,
+        reserve_remaining: Callable[[int], None] | None = None,
     ) -> list[dict[str, Any]]:
         """Run one documented paged query and return all its rows.
 
-        Pager rules: request offset 0, then the advancing offset from
-        ``links.next``; same origin/path, same filters/sort/limit; on full
-        pages the next offset must advance by exactly the page size; end on
-        a null next or a short page. A full page whose valid continuation
-        would exceed offset 10,000 raises ``_QueryCeiling`` before that
-        request is made. ``single_page`` (used by the one-page maximum
-        expiration discovery and its guard query) returns the first page
-        without following ``links.next``. When *on_page* is given it is
-        called with each page's row count as soon as that page has been
-        fetched, so callers can fail fast on budget lower bounds that the
-        already-seen rows imply.
+        Ordinary pager rules: request offset 0, then the advancing offset
+        from ``links.next``; same origin/path, same filters/sort/limit; on
+        full pages the next offset must advance by exactly the page size;
+        end on a null next or a short page. A full page whose valid
+        continuation would exceed offset 10,000 raises ``_QueryCeiling``
+        (carrying the proven ``minimum_rows`` bound) before that request
+        is made. ``single_page`` (used by the one-page maximum-expiration
+        discovery, its guard, and the grid reference guards) returns the
+        first page without following ``links.next``.
+
+        With ``probe_ceiling`` a query that does not fit under the offset
+        ceiling is detected in two GETs: after a full first page the pager
+        fetches the last legal page boundary ``T = (C // P) * P`` directly
+        with the same filters. A full tail page proves rows past the
+        ceiling; a nonempty terminal tail page proves the exact number of
+        intervening pages, which are then walked in ordinary continuation
+        order with the cached tail reused instead of re-fetched; an empty
+        tail supplies no row bound, so the ordinary walk continues to the
+        terminal page and the redundant probe is ignored. When
+        *reserve_remaining* is given it is called with the proven minimum
+        of additional GETs this query still needs (including the next one)
+        before each actual request, so callers can fail fast on budget
+        lower bounds spanning sibling partitions.
         """
         page_limit = self._page_size if limit is None else limit
-        sent = dict(params)
-        offset = 0
-        rows: list[dict[str, Any]] = []
-        while True:
-            url = self._build_url(
-                path,
-                [
-                    *params,
-                    ("page[offset]", str(offset)),
-                    ("page[limit]", str(page_limit)),
-                ],
-                compact=compact,
-            )
-            payload = self._get_json(url, budget)
-            meta = payload.get("meta")
-            data = payload.get("data")
-            links = payload.get("links")
-            if not isinstance(meta, dict):
-                raise ProviderError("EODHD response is missing a meta object")
-            if _strict_int(meta.get("offset")) != offset or _strict_int(
-                meta.get("limit")
-            ) != page_limit:
-                raise ProviderError(
-                    "EODHD response meta does not match the sent paging parameters"
-                )
-            if not isinstance(data, list):
-                raise ProviderError("EODHD response data is not a list")
-            for row in data:
-                if not isinstance(row, dict):
-                    raise ProviderError("EODHD response row is not an object")
-                row_id = row.get("id")
-                attributes = row.get("attributes")
-                if not isinstance(row_id, str) or not isinstance(attributes, dict):
-                    raise ProviderError("EODHD response row lacks id/attributes")
-                row_validator(row)
-            next_link: str | None = None
-            if links is not None:
-                if not isinstance(links, dict):
-                    raise ProviderError("EODHD response links is not an object")
-                raw_next = links.get("next")
-                if raw_next is not None:
-                    if not isinstance(raw_next, str):
-                        raise ProviderError("EODHD continuation link is not a string")
-                    next_link = raw_next
-            rows.extend(data)
-            if on_page is not None:
-                on_page(len(data))
-            if single_page or next_link is None:
-                return rows
-            short_page = len(data) < page_limit
-            next_offset = self._parse_continuation(
-                next_link,
+        reserve = (
+            reserve_remaining
+            if reserve_remaining is not None
+            else lambda _n: None
+        )
+        tail_offset = (_OFFSET_CEILING // page_limit) * page_limit
+        page_digests: dict[str, int] = {}
+
+        def note_page(page: _QueryPage, offset: int) -> None:
+            if len(page.data) < page_limit:
+                return
+            digest = hashlib.sha256(
+                json.dumps(page.data, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            previous = page_digests.get(digest)
+            if previous is not None and previous != offset:
+                raise ProviderError("EODHD repeated page at a different offset")
+            page_digests[digest] = offset
+
+        def fetch_page(offset: int) -> _QueryPage:
+            return self._fetch_page(
                 path=path,
-                sent=sent,
-                expected_offset=offset + page_limit,
-                full_page=not short_page,
-                current_offset=offset,
+                params=params,
+                budget=budget,
+                compact=compact,
+                row_validator=row_validator,
+                offset=offset,
+                page_limit=page_limit,
             )
-            if short_page:
+
+        reserve(1)
+        page = fetch_page(0)
+        note_page(page, 0)
+        rows: list[dict[str, Any]] = list(page.data)
+        if single_page or page.next_offset is None:
+            return rows
+        if len(page.data) < page_limit:
+            raise ProviderError(
+                "EODHD pagination inconsistent: short page carries a "
+                "continuation link"
+            )
+        first_next = page.next_offset
+        if first_next is None:
+            raise ProviderError(
+                "EODHD pagination inconsistent: full page carries no "
+                "continuation link"
+            )
+
+        if not probe_ceiling:
+            offset = first_next
+            while True:
+                reserve(1)
+                page = fetch_page(offset)
+                note_page(page, offset)
+                rows.extend(page.data)
+                follow = page.next_offset
+                if follow is None:
+                    return rows
+                if len(page.data) < page_limit:
+                    raise ProviderError(
+                        "EODHD pagination inconsistent: short page carries "
+                        "a continuation link"
+                    )
+                if follow > _OFFSET_CEILING:
+                    raise _QueryCeiling(minimum_rows=offset + len(page.data))
+                offset = follow
+
+        # Ceiling-probe mode: page 0 is full with a continuation. T == 0
+        # means page 0 already is the tail; T == next_offset means the
+        # tail fetch is the ordinary next page rather than extra work.
+        if tail_offset == 0:
+            tail = page
+        else:
+            if first_next == tail_offset:
+                reserve(1)
+            else:
+                # Distant probe: the probe itself plus at least one
+                # required middle-page request (or the ceiling signal).
+                reserve(2)
+            tail = fetch_page(tail_offset)
+            note_page(tail, tail_offset)
+        if tail.next_offset is not None:
+            if len(tail.data) >= page_limit:
+                # The tail sits at the last legal page boundary; a full
+                # one proves rows past the ceiling without downloading
+                # them and without retaining this query's rows.
+                raise _QueryCeiling(minimum_rows=tail_offset + len(tail.data))
+            raise ProviderError(
+                "EODHD pagination inconsistent with ceiling probe"
+            )
+        if not tail.data:
+            # Empty tail: no T + 0 row lower bound; the ordinary walk
+            # decides. The redundant probe completes the query at offset T.
+            offset = first_next
+            while True:
+                if offset == tail_offset:
+                    return rows
+                reserve(1)
+                page = fetch_page(offset)
+                note_page(page, offset)
+                rows.extend(page.data)
+                follow = page.next_offset
+                if follow is None:
+                    return rows
+                if len(page.data) < page_limit:
+                    raise ProviderError(
+                        "EODHD pagination inconsistent: short page carries "
+                        "a continuation link"
+                    )
+                if follow > _OFFSET_CEILING:
+                    raise _QueryCeiling(minimum_rows=offset + len(page.data))
+                offset = follow
+
+        # Nonempty terminal tail: walk the intervening offsets in ordinary
+        # continuation order, then reuse the cached tail by offset equality.
+        unfetched = tail_offset // page_limit - 1
+        offset = first_next
+        while offset != tail_offset:
+            reserve(unfetched)
+            try:
+                middle = fetch_page(offset)
+            except (ProviderTimeoutError, ProviderRateLimitError):
+                raise
+            except ProviderError as exc:
                 raise ProviderError(
-                    "EODHD pagination inconsistent: short page carries a "
-                    "continuation link"
+                    "EODHD pagination inconsistent with ceiling probe"
+                ) from exc
+            if middle.next_offset is None or len(middle.data) < page_limit:
+                raise ProviderError(
+                    "EODHD pagination inconsistent with ceiling probe"
                 )
-            if next_offset > _OFFSET_CEILING:
-                raise _QueryCeiling()
-            offset = next_offset
+            note_page(middle, offset)
+            rows.extend(middle.data)
+            unfetched -= 1
+            offset = middle.next_offset
+        rows.extend(tail.data)
+        return rows
+
+    def _fetch_page(
+        self,
+        *,
+        path: str,
+        params: list[tuple[str, str]],
+        budget: _RequestBudget,
+        compact: bool,
+        row_validator: Callable[[dict[str, Any]], None],
+        offset: int,
+        page_limit: int,
+    ) -> _QueryPage:
+        """Fetch and validate one page; parse its continuation link if sent."""
+        sent = dict(params)
+        url = self._build_url(
+            path,
+            [
+                *params,
+                ("page[offset]", str(offset)),
+                ("page[limit]", str(page_limit)),
+            ],
+            compact=compact,
+        )
+        payload = self._get_json(url, budget)
+        meta = payload.get("meta")
+        data = payload.get("data")
+        links = payload.get("links")
+        if not isinstance(meta, dict):
+            raise ProviderError("EODHD response is missing a meta object")
+        if _strict_int(meta.get("offset")) != offset or _strict_int(
+            meta.get("limit")
+        ) != page_limit:
+            raise ProviderError(
+                "EODHD response meta does not match the sent paging parameters"
+            )
+        if not isinstance(data, list):
+            raise ProviderError("EODHD response data is not a list")
+        for row in data:
+            if not isinstance(row, dict):
+                raise ProviderError("EODHD response row is not an object")
+            row_id = row.get("id")
+            attributes = row.get("attributes")
+            if not isinstance(row_id, str) or not isinstance(attributes, dict):
+                raise ProviderError("EODHD response row lacks id/attributes")
+            row_validator(row)
+        next_offset: int | None = None
+        if links is not None:
+            if not isinstance(links, dict):
+                raise ProviderError("EODHD response links is not an object")
+            raw_next = links.get("next")
+            if raw_next is not None:
+                if not isinstance(raw_next, str):
+                    raise ProviderError("EODHD continuation link is not a string")
+                next_offset = self._parse_continuation(
+                    raw_next,
+                    path=path,
+                    sent=sent,
+                    expected_offset=offset + page_limit,
+                    expected_limit=page_limit,
+                    full_page=len(data) >= page_limit,
+                    current_offset=offset,
+                )
+        return _QueryPage(data=data, next_offset=next_offset)
 
     def _parse_continuation(
         self,
@@ -465,6 +645,7 @@ class EodhdOptionsProvider(ChainProvider):
         path: str,
         sent: dict[str, str],
         expected_offset: int,
+        expected_limit: int,
         full_page: bool,
         current_offset: int,
     ) -> int:
@@ -486,6 +667,13 @@ class EodhdOptionsProvider(ChainProvider):
                 raise ProviderError(
                     f"EODHD continuation link changed sent filter {key!r}"
                 )
+        raw_limit = values.get("page[limit]")
+        if raw_limit is None:
+            raise ProviderError("EODHD continuation link lacks page[limit]")
+        if raw_limit.strip() != str(expected_limit):
+            raise ProviderError(
+                "EODHD continuation link changed the sent page size"
+            )
         raw_offset = values.get("page[offset]")
         if raw_offset is None:
             raise ProviderError("EODHD continuation link lacks page[offset]")
@@ -561,28 +749,6 @@ class EodhdOptionsProvider(ChainProvider):
 
     # -- reference extraction ---------------------------------------------
 
-    @staticmethod
-    def _enumeration_page_reserve(
-        budget: _RequestBudget,
-    ) -> Callable[[int], None]:
-        """Build a per-page lower-bound reserve for one reference query.
-
-        Every enumerated reference row implies at least one future
-        per-contract history request, so once the rows seen so far plus the
-        requests already spent exceed the cap, the run cannot complete and
-        must stop before burning further requests on enumeration. Rows from
-        a walk later discarded by a ceiling split remain valid evidence:
-        partitioning re-finds the same contracts.
-        """
-        seen = 0
-
-        def note(count: int) -> None:
-            nonlocal seen
-            seen += count
-            budget.reserve(seen)
-
-        return note
-
     def _discover_max_expiration(
         self, root: str, start: date, budget: _RequestBudget
     ) -> tuple[date | None, str | None]:
@@ -630,6 +796,140 @@ class EodhdOptionsProvider(ChainProvider):
         if rows:
             raise ProviderError("EODHD reference maximum is inconsistent")
 
+    def _walk_partitions(
+        self,
+        root: str,
+        low: date,
+        high: date,
+        budget: _RequestBudget,
+        *,
+        resource: Literal["contracts", "eod"],
+        future_requests: int,
+        consume: Callable[[list[dict[str, Any]]], None],
+    ) -> None:
+        """Exhaustively walk a root's filtered-query row space.
+
+        Deterministic depth-first over disjoint partitions: expiry-date
+        interval, then right, then the inclusive OSI strike-integer
+        interval. Every saturated partition is split; its partially seen
+        rows are discarded and re-read under the children, so each leaf's
+        complete rows reach *consume* exactly once and no truncated result
+        can be returned. Leaf rows are never filtered against the
+        reference catalog: grid rows with valid identities that the
+        reference inventory lacks still belong to the grid.
+        """
+        is_contracts = resource == "contracts"
+        path = _PATH_CONTRACTS if is_contracts else _PATH_EOD
+        compact = not is_contracts
+        indivisible_message = (
+            "EODHD contract partition cannot be exhausted"
+            if is_contracts
+            else "EODHD grid partition cannot be exhausted"
+        )
+        page_limit = self._page_size
+        pending: list[_QueryPartition] = [
+            _QueryPartition(expiry_from=low, expiry_to=high)
+        ]
+        while pending:
+            partition = pending.pop()
+            siblings = len(pending)
+
+            def reserve_for_query(
+                minimum: int, siblings: int = siblings
+            ) -> None:
+                budget.reserve(minimum + siblings + future_requests)
+
+            params = [
+                ("filter[underlying_symbol]", root),
+                ("filter[exp_date_from]", partition.expiry_from.isoformat()),
+                ("filter[exp_date_to]", partition.expiry_to.isoformat()),
+                ("sort", "exp_date"),
+            ]
+            if partition.source_type is not None:
+                params.append(("filter[type]", partition.source_type))
+            strike_low = partition.strike_from
+            if strike_low is not None:
+                strike_high = partition.strike_to
+                if strike_high is None:
+                    raise ProviderError(
+                        "EODHD partition strike bounds must be set together"
+                    )
+                # Strike bounds are always set together, and the
+                # pre-bisection partition sends no strike filters at all:
+                # no child ever re-queries an unchanged full strike range.
+                params.extend(
+                    [
+                        ("filter[strike_from]", _strike_param(strike_low)),
+                        ("filter[strike_to]", _strike_param(strike_high)),
+                    ]
+                )
+            sent = dict(params)
+            try:
+                rows = self._paged_query(
+                    path=path,
+                    params=params,
+                    budget=budget,
+                    compact=compact,
+                    row_validator=(
+                        self._reference_row_validator(sent)
+                        if is_contracts
+                        else self._eod_row_validator(sent)
+                    ),
+                    probe_ceiling=True,
+                    reserve_remaining=reserve_for_query,
+                )
+            except _QueryCeiling as ceiling:
+                if partition.expiry_from != partition.expiry_to:
+                    mid_day = partition.expiry_from + timedelta(
+                        days=(partition.expiry_to - partition.expiry_from).days // 2
+                    )
+                    children = [
+                        replace(partition, expiry_from=mid_day + timedelta(days=1)),
+                        replace(partition, expiry_to=mid_day),
+                    ]
+                elif partition.source_type is None:
+                    children = [
+                        replace(partition, source_type="put"),
+                        replace(partition, source_type="call"),
+                    ]
+                elif partition.strike_from is None:
+                    # First strike bisection over the full OSI interval;
+                    # both children carry both exact endpoints so neither
+                    # re-queries an unchanged full strike range.
+                    mid_strike = _STRIKE_MAX // 2
+                    children = [
+                        replace(
+                            partition,
+                            strike_from=mid_strike + 1,
+                            strike_to=_STRIKE_MAX,
+                        ),
+                        replace(partition, strike_from=0, strike_to=mid_strike),
+                    ]
+                else:
+                    strike_low = partition.strike_from
+                    strike_high = partition.strike_to
+                    if strike_low is None or strike_high is None:
+                        raise ProviderError(indivisible_message) from ceiling
+                    if strike_low == strike_high:
+                        raise ProviderError(indivisible_message) from ceiling
+                    mid_strike = strike_low + (strike_high - strike_low) // 2
+                    children = [
+                        replace(partition, strike_from=mid_strike + 1),
+                        replace(partition, strike_to=mid_strike),
+                    ]
+                # Every parent source row must be re-read under the
+                # disjoint children, so the leaf-page count implied by the
+                # ceiling's proven row bound bounds the children's work
+                # from below.
+                needed = max(
+                    len(children),
+                    -(-ceiling.minimum_rows // page_limit),
+                )
+                budget.reserve(needed + siblings + future_requests)
+                pending.extend(children)
+                continue
+            consume(rows)
+
     def _enumerate_references(
         self,
         root: str,
@@ -637,107 +937,45 @@ class EodhdOptionsProvider(ChainProvider):
         high: date,
         budget: _RequestBudget,
         out: dict[str, _Reference],
+        *,
+        future_requests: int = 0,
     ) -> None:
         """Collect reference contracts with exp_date in inclusive [low, high]."""
-        params = [
-            ("filter[underlying_symbol]", root),
-            ("filter[exp_date_from]", low.isoformat()),
-            ("filter[exp_date_to]", high.isoformat()),
-            ("sort", "exp_date"),
-        ]
-        try:
-            rows = self._paged_query(
-                path=_PATH_CONTRACTS,
-                params=params,
-                budget=budget,
-                compact=False,
-                row_validator=self._reference_row_validator(dict(params)),
-                on_page=self._enumeration_page_reserve(budget),
-            )
-        except _QueryCeiling:
-            if low == high:
-                self._collect_saturated_expiration(root, low, budget, out)
-                return
-            mid = low + timedelta(days=(high - low).days // 2)
-            self._enumerate_references(root, low, mid, budget, out)
-            self._enumerate_references(root, mid + timedelta(days=1), high, budget, out)
-            return
-        for row in rows:
-            self._absorb_reference(row, out)
 
-    def _collect_saturated_expiration(
-        self, root: str, expiration: date, budget: _RequestBudget, out: dict[str, _Reference]
-    ) -> None:
-        """Extract one saturated expiration: split by right, then strike."""
-        for source_type in ("call", "put"):
-            params = [
-                ("filter[underlying_symbol]", root),
-                ("filter[exp_date_from]", expiration.isoformat()),
-                ("filter[exp_date_to]", expiration.isoformat()),
-                ("filter[type]", source_type),
-                ("sort", "exp_date"),
-            ]
-            try:
-                rows = self._paged_query(
-                    path=_PATH_CONTRACTS,
-                    params=params,
-                    budget=budget,
-                    compact=False,
-                    row_validator=self._reference_row_validator(dict(params)),
-                    on_page=self._enumeration_page_reserve(budget),
-                )
-            except _QueryCeiling:
-                self._collect_strike_partition(
-                    root, expiration, source_type, 0, _STRIKE_MAX, budget, out
-                )
-                continue
+        def absorb(rows: list[dict[str, Any]]) -> None:
             for row in rows:
                 self._absorb_reference(row, out)
 
-    def _collect_strike_partition(
-        self,
-        root: str,
-        expiration: date,
-        source_type: str,
-        low: int,
-        high: int,
-        budget: _RequestBudget,
-        out: dict[str, _Reference],
+        self._walk_partitions(
+            root,
+            low,
+            high,
+            budget,
+            resource="contracts",
+            future_requests=future_requests,
+            consume=absorb,
+        )
+
+    def _guard_grid_beyond_reference(
+        self, root: str, reference_max: date, budget: _RequestBudget
     ) -> None:
-        """Bisect the inclusive strike-integer interval for one expiration/right."""
+        """Require zero raw grid rows beyond the reference maximum expiry."""
         params = [
             ("filter[underlying_symbol]", root),
-            ("filter[exp_date_from]", expiration.isoformat()),
-            ("filter[exp_date_to]", expiration.isoformat()),
-            ("filter[type]", source_type),
-            ("filter[strike_from]", _strike_param(low)),
-            ("filter[strike_to]", _strike_param(high)),
+            ("filter[exp_date_from]", (reference_max + timedelta(days=1)).isoformat()),
             ("sort", "exp_date"),
         ]
-        try:
-            rows = self._paged_query(
-                path=_PATH_CONTRACTS,
-                params=params,
-                budget=budget,
-                compact=False,
-                row_validator=self._reference_row_validator(dict(params)),
-                on_page=self._enumeration_page_reserve(budget),
-            )
-        except _QueryCeiling:
-            if low == high:
-                raise ProviderError(
-                    "EODHD contract partition cannot be exhausted"
-                ) from None
-            mid = low + (high - low) // 2
-            self._collect_strike_partition(
-                root, expiration, source_type, low, mid, budget, out
-            )
-            self._collect_strike_partition(
-                root, expiration, source_type, mid + 1, high, budget, out
-            )
-            return
-        for row in rows:
-            self._absorb_reference(row, out)
+        raw = self._paged_query(
+            path=_PATH_EOD,
+            params=params,
+            budget=budget,
+            compact=True,
+            row_validator=self._eod_row_validator(dict(params)),
+            limit=1,
+            single_page=True,
+        )
+        if raw:
+            raise ProviderError("EODHD grid maximum exceeds reference maximum")
 
     def _absorb_reference(self, row: dict[str, Any], out: dict[str, _Reference]) -> None:
         reference = _reference_from_row(row)
@@ -876,7 +1114,29 @@ class EodhdOptionsProvider(ChainProvider):
     ) -> pd.DataFrame:
         discovered_max, reason = self._discover_max_expiration(root, start, budget)
         if discovered_max is None:
-            assert reason is not None
+            if reason == REASON_NO_CONTRACTS:
+                # An empty reference inventory plus raw grid rows is a
+                # source inconsistency, not silent no-data.
+                params = [
+                    ("filter[underlying_symbol]", root),
+                    ("filter[exp_date_from]", start.isoformat()),
+                    ("sort", "exp_date"),
+                ]
+                raw = self._paged_query(
+                    path=_PATH_EOD,
+                    params=params,
+                    budget=budget,
+                    compact=True,
+                    row_validator=self._eod_row_validator(dict(params)),
+                    limit=1,
+                    single_page=True,
+                )
+                if raw:
+                    raise ProviderError(
+                        "EODHD grid has rows without reference inventory"
+                    )
+            if reason is None:
+                raise ProviderError("EODHD no-data reason is missing")
             empty = empty_chain_frame()
             return self._finish(
                 empty,
@@ -890,9 +1150,14 @@ class EodhdOptionsProvider(ChainProvider):
                 started=started,
                 reason=reason,
             )
+        # Guard + reference first page + (grid guard, at least one grid GET)
+        # are four proven further requests before any deeper work.
+        budget.reserve(4)
         self._guard_max_expiration(root, discovered_max, budget)
         references: dict[str, _Reference] = {}
-        self._enumerate_references(root, start, discovered_max, budget, references)
+        self._enumerate_references(
+            root, start, discovered_max, budget, references, future_requests=2
+        )
         if not references:
             raise ProviderError(
                 "EODHD reference enumeration returned no contracts for a "
@@ -901,16 +1166,40 @@ class EodhdOptionsProvider(ChainProvider):
         enumerated_max = max(ref.expiry for ref in references.values())
         if enumerated_max != discovered_max:
             raise ProviderError("EODHD reference maximum is inconsistent")
-        eligible = sorted(
-            (ref for ref in references.values() if ref.expiry >= start),
-            key=lambda ref: ref.contract,
+        self._guard_grid_beyond_reference(root, enumerated_max, budget)
+        parts: list[pd.DataFrame] = []
+
+        def absorb_leaf(rows: list[dict[str, Any]]) -> None:
+            # Each complete leaf is normalized immediately (source fields,
+            # identity and duplicate semantics checked), sliced locally by
+            # ID labels, and retained only when nonempty; the raw leaf rows
+            # are released before the next query.
+            leaf = self._normalise(rows)
+            leaf = _slice_window(leaf, start, end)
+            if not leaf.empty:
+                parts.append(leaf)
+
+        self._walk_partitions(
+            root,
+            start,
+            discovered_max,
+            budget,
+            resource="eod",
+            future_requests=0,
+            consume=absorb_leaf,
         )
-        budget.reserve(len(eligible))
-        rows: list[dict[str, Any]] = []
-        for reference in eligible:
-            rows.extend(self._fetch_contract_history(reference.contract, budget))
-        frame = self._normalise(rows)
-        frame = _slice_window(frame, start, end)
+        if not parts:
+            frame = empty_chain_frame()
+        else:
+            try:
+                # Disjoint partition predicates make a shared (as_of,
+                # contract) across leaves impossible; concat verifies that.
+                frame = pd.concat(parts, verify_integrity=True)
+            except ValueError as exc:
+                raise ProviderError(
+                    "EODHD grid partitions returned overlapping observation IDs"
+                ) from exc
+            frame = frame.sort_index()
         return self._finish(
             frame,
             root=root,
@@ -1230,7 +1519,9 @@ def _normalise(
         record["tradetime"] = tradetime
         record["bid_timestamp_utc"] = _parse_aware_utc(bid_raw)
         record["ask_timestamp_utc"] = _parse_aware_utc(ask_raw)
-        record["has_non_session_label"] = not session_classifier(parsed_id.as_of)
+        # The session label must come from THIS row's id-derived as_of, not
+        # a parsed id left over from the dedupe pass above.
+        record["has_non_session_label"] = not session_classifier(as_of.date())
         index_as_of.append(as_of)
         index_contract.append(contract)
         records.append(record)
