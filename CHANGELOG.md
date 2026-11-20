@@ -3,6 +3,20 @@
 All notable changes to fin3 are documented here. Versions follow 0.x minor
 bumps for new features; dates are UTC.
 
+## Unreleased
+
+### Added
+
+- **`ArcticStorage.from_memory(lock=None)`**: volatile, process-local storage
+  backed by ArcticDB's native `mem://` adapter, alongside `from_lmdb()`.
+  Each call starts an empty, independent in-process store (two instances
+  constructed with the same URI share nothing); data is not recoverable
+  after process exit. Accepts the same opt-in `LockConfig` as `from_lmdb()`.
+  Can be injected into `OptionsDataFetcher(config, storage=...)` for
+  provider-free readback work. LMDB routing was unified under the storage
+  scheme (`lmdb`/`mem`) with no change to LMDB behavior, signatures, or
+  readback target summaries.
+
 ## 0.4.1 — 2026-11-11
 
 ### Fixed

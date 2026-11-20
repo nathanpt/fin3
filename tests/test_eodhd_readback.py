@@ -197,6 +197,52 @@ class TestReadbackTargetSummary:
         assert "wJalrXUtnFEMI-example-secret" not in summary
 
 
+class TestMemorySnapshotReadback:
+    """The ``mem://`` backend serves the provider-free readback path."""
+
+    def test_memory_snapshot_reads_without_provider(
+        self,
+        unit_config: ClientConfig,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """read_chain() serves a stored memory snapshot without any provider
+        resolution, with exact manifest/frame fidelity and no cross-store leak."""
+        storage = ArcticStorage.from_memory()
+        merged, manifest = _store_shy_snapshot(storage, unit_config)
+
+        def _forbidden(self: OptionsDataFetcher) -> Any:
+            raise AssertionError("provider resolution must not run on readback")
+
+        monkeypatch.setattr(OptionsDataFetcher, "_resolve_provider", _forbidden)
+
+        fetcher = OptionsDataFetcher(unit_config, storage=storage)
+        result = fetcher.read_chain("SHY", SHY_DAY)
+        assert result.status == "observed"
+        assert result.manifest == manifest
+        expected = merged[
+            merged.index.get_level_values("as_of") == pd.Timestamp(SHY_DAY, tz="UTC")
+        ]
+        # Exact frame equality also proves the UTC-restored timestamp
+        # columns: naive stored values are re-localized to the original UTC.
+        pd.testing.assert_frame_equal(
+            result.data, expected, check_exact=True, check_freq=False
+        )
+        summary = _readback_target(storage)
+        assert "backend=mem endpoint=mem secure=false" in summary
+        assert "bucket=__mem__" in summary
+        assert "arctic_library=options-eod-eodhd" in summary
+        assert "library=options-eod-eodhd symbol=SHY" in summary
+
+        # A separately constructed memory store cannot discover the snapshot.
+        stranger = ArcticStorage.from_memory()
+        lone = OptionsDataFetcher(unit_config, storage=stranger).read_chain(
+            "SHY", SHY_DAY
+        )
+        assert lone.status == "no_data"
+        assert lone.data.empty
+        assert lone.manifest is None
+
+
 class TestFinlabReadbackValidator:
     """The finlab child-result validator fails closed on boundary breaches."""
 

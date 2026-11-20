@@ -16,6 +16,19 @@ from tests.conftest import make_ohlcv
 from tests.test_defrag import fragment_symbol_with_updates
 
 
+@pytest.fixture(params=["lmdb", "memory"])
+def storage(request: pytest.FixtureRequest, lmdb_path: str) -> ArcticStorage:
+    """Run this module against both real local backends.
+
+    Overrides the shared conftest fixture for this module only: every
+    ``storage``-consuming test here executes once against LMDB and once
+    against the ``mem://`` adapter.
+    """
+    if request.param == "lmdb":
+        return ArcticStorage.from_lmdb(lmdb_path)
+    return ArcticStorage.from_memory()
+
+
 class TestArcticStorage:
     def test_write_and_read(self, storage: ArcticStorage) -> None:
         df = make_ohlcv("2024-01-02 09:30", periods=10, freq="1min")
@@ -561,3 +574,82 @@ class TestSignedBucketBoundary:
         with pytest.raises(StorageError, match="Failed to create library"):
             storage._get_or_create_library("race2-lib")
         assert storage.has_library("race2-lib") is False
+
+
+class TestInMemoryStorage:
+    """The ``mem://`` backend: store/library isolation and opt-in locking."""
+
+    def test_memory_stores_and_libraries_are_isolated(self) -> None:
+        """Two from_memory() stores share nothing, even under identical
+        library and symbol names; a write in one never surfaces in the other."""
+        store = ArcticStorage.from_memory()
+        df_a = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        df_b = make_ohlcv("2024-01-02 09:30", periods=7, freq="1min", base_price=50.0)
+        meta_a = {"store": "first", "library": "lib-a"}
+        meta_b = {"store": "first", "library": "lib-b"}
+        store.write("lib-a", "AAPL", df_a, metadata=meta_a)
+        store.write("lib-b", "AAPL", df_b, metadata=meta_b)
+
+        # Same names, freshly constructed store: nothing is visible yet.
+        twin = ArcticStorage.from_memory()
+        assert twin.read_with_metadata("lib-a", "AAPL") is None
+        assert twin.read_with_metadata("lib-b", "AAPL") is None
+        assert twin.arctic.list_libraries() == []
+
+        twin_df_a = make_ohlcv(
+            "2024-01-02 09:30", periods=3, freq="1min", base_price=9.0
+        )
+        twin_meta_a = {"store": "twin", "library": "lib-a"}
+        twin.write("lib-a", "AAPL", twin_df_a, metadata=twin_meta_a)
+
+        # After the twin's write, all three pairs still match their inputs.
+        first_a = store.read_with_metadata("lib-a", "AAPL")
+        assert first_a is not None
+        pd.testing.assert_frame_equal(
+            first_a[0], df_a, check_exact=True, check_freq=False
+        )
+        assert first_a[1] == meta_a
+        first_b = store.read_with_metadata("lib-b", "AAPL")
+        assert first_b is not None
+        pd.testing.assert_frame_equal(
+            first_b[0], df_b, check_exact=True, check_freq=False
+        )
+        assert first_b[1] == meta_b
+        twin_a = twin.read_with_metadata("lib-a", "AAPL")
+        assert twin_a is not None
+        pd.testing.assert_frame_equal(
+            twin_a[0], twin_df_a, check_exact=True, check_freq=False
+        )
+        assert twin_a[1] == twin_meta_a
+
+    @pytest.mark.parametrize(
+        ("enabled", "expect_lock_file"),
+        [
+            pytest.param(None, False, id="lock_omitted"),
+            pytest.param(False, False, id="lock_disabled"),
+            pytest.param(True, True, id="lock_enabled"),
+        ],
+    )
+    def test_memory_locking_is_opt_in(
+        self, tmp_path, enabled: bool | None, expect_lock_file: bool
+    ) -> None:
+        """Locking stays off unless an enabled LockConfig is passed; an
+        enabled config leaves its .lock file only in the supplied directory."""
+        lock_dir = tmp_path / "locks"
+        lock = (
+            LockConfig(enabled=enabled, lock_dir=str(lock_dir))
+            if enabled is not None
+            else None
+        )
+        storage = ArcticStorage.from_memory(lock=lock)
+        df = make_ohlcv("2024-01-02 09:30", periods=5, freq="1min")
+        with storage.lock_symbol("test-lib", "AAPL"):
+            storage.write("test-lib", "AAPL", df)
+
+        result = storage.read("test-lib", "AAPL")
+        assert result is not None
+        pd.testing.assert_frame_equal(result, df, check_exact=True, check_freq=False)
+        if expect_lock_file:
+            assert any(lock_dir.glob("*.lock"))
+        else:
+            assert not any(lock_dir.glob("*.lock"))
