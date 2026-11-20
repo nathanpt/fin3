@@ -74,7 +74,6 @@ class ArcticStorage:
         self._host, _, self._port = config.endpoint.partition(":")
         self._arctic_cache: dict[str, adb.Arctic] = {}
         self._library_cache: dict[str, adb.Library] = {}
-        self._is_lmdb = False
         # When bucket is set, all libraries live inside this single bucket
         # using the library name as the ArcticDB library name.
         self._single_bucket = config.bucket or ""
@@ -98,9 +97,9 @@ class ArcticStorage:
     def _get_arctic(self, bucket: str) -> adb.Arctic:
         if bucket in self._arctic_cache:
             return self._arctic_cache[bucket]
-        # LMDB mode: single Arctic instance, library name = bucket
-        if self._is_lmdb:
-            return self._arctic_cache["__lmdb__"]
+        # Local modes (lmdb, mem): single Arctic instance, library name = bucket
+        if self._scheme in ("lmdb", "mem"):
+            return self._arctic_cache[f"__{self._scheme}__"]
         try:
             uri = self._build_uri(bucket)
             arctic = adb.Arctic(uri)
@@ -112,24 +111,24 @@ class ArcticStorage:
         return arctic
 
     @classmethod
-    def from_lmdb(
-        cls, path: str, lock: LockConfig | None = None
-    ) -> ArcticStorage:
-        """Create an ArcticStorage backed by LMDB (for testing).
+    def _from_local_uri(cls, uri: str, lock: LockConfig | None) -> ArcticStorage:
+        """Initialise a process-local store (``lmdb://`` path or ``mem://``).
 
-        LMDB is single-process, so locking is off by default; pass *lock* to
-        enable it (e.g. for tests of the concurrent-access-protection path).
+        Bypasses ``__init__`` because no MinIO endpoint applies to a local
+        backend: the config records only the scheme with blank credentials.
+        Constructs exactly one ``adb.Arctic`` and caches it under
+        ``__<scheme>__``; native constructor failures propagate unchanged.
         """
+        scheme = uri.partition("://")[0]
         storage = cls.__new__(cls)
-        storage._config = MinioConfig(endpoint="lmdb", access_key="", secret_key="")
-        storage._scheme = "lmdb"
+        storage._config = MinioConfig(endpoint=scheme, access_key="", secret_key="")
+        storage._scheme = scheme
         storage._host = ""
         storage._port = ""
+        storage._single_bucket = ""
         storage._arctic_cache = {}
         storage._library_cache = {}
-        storage._is_lmdb = True
-        arctic = adb.Arctic(f"lmdb://{path}")
-        storage._arctic_cache["__lmdb__"] = arctic
+        storage._arctic_cache[f"__{scheme}__"] = adb.Arctic(uri)
         if lock is not None and lock.enabled:
             storage._lock = SymbolLock(
                 lock_dir=lock.lock_dir, timeout_s=lock.timeout_s,
@@ -138,6 +137,40 @@ class ArcticStorage:
         else:
             storage._lock = None
         return storage
+
+    @classmethod
+    def from_lmdb(
+        cls, path: str, lock: LockConfig | None = None
+    ) -> ArcticStorage:
+        """Create an ArcticStorage backed by LMDB (for testing).
+
+        LMDB is single-process, so locking is off by default; pass *lock* to
+        enable it (e.g. for tests of the concurrent-access-protection path).
+        """
+        return cls._from_local_uri(f"lmdb://{path}", lock)
+
+    @classmethod
+    def from_memory(cls, lock: LockConfig | None = None) -> ArcticStorage:
+        """Create a volatile, process-local store backed by ArcticDB's ``mem://``.
+
+        Each call starts an empty, independent in-process store. Callers
+        that want to share data must share the returned storage object
+        rather than constructing another one with the same URI.
+
+        Data is volatile and is not recoverable after process exit. This is
+        not a cross-process shared database, a streaming reader, a bounded
+        cache, or a disk fallback.
+
+        Locking defaults off, as with :meth:`from_lmdb`. An explicitly
+        enabled :class:`LockConfig` retains the existing file-lock behavior
+        and can create lock files; RAM storage is no guarantee against OS
+        swapping.
+
+        Existing ``read``, ``read_with_metadata``, ``write``, ``update``,
+        library lookup, and symbol operations keep their contracts. Native
+        initialization failures propagate as they do for ``from_lmdb()``.
+        """
+        return cls._from_local_uri("mem://", lock)
 
     def lock_symbol(self, library: str, symbol: str) -> ContextManager[None]:
         """Return a context manager that acquires a per-(library, symbol) advisory lock.
@@ -287,13 +320,13 @@ class ArcticStorage:
     def _library_location(self, name: str) -> tuple[str, str]:
         """Map a logical library name to its ``(bucket, arctic library name)``.
 
-        LMDB uses the shared ``__lmdb__`` Arctic instance with the supplied
-        name; single-bucket MinIO uses ``config.bucket`` with the supplied
-        name; per-library-bucket mode uses the supplied name as bucket with
-        Arctic library ``main``.
+        Local backends (``lmdb``, ``mem``) use the shared ``__<scheme>__``
+        Arctic instance with the supplied name; single-bucket MinIO uses
+        ``config.bucket`` with the supplied name; per-library-bucket mode
+        uses the supplied name as bucket with Arctic library ``main``.
         """
-        if self._is_lmdb:
-            return ("__lmdb__", name)
+        if self._scheme in ("lmdb", "mem"):
+            return (f"__{self._scheme}__", name)
         if self._single_bucket:
             return (self._single_bucket, name)
         return (name, _S3_LIB_NAME)
@@ -310,7 +343,7 @@ class ArcticStorage:
             return cached
 
         bucket, lib_name = self._library_location(name)
-        if not self._is_lmdb and not self._bucket_exists(bucket):
+        if self._scheme not in ("lmdb", "mem") and not self._bucket_exists(bucket):
             return None
 
         arctic = self._get_arctic(bucket)
@@ -334,7 +367,7 @@ class ArcticStorage:
             return cached
 
         bucket, lib_name = self._library_location(name)
-        if not self._is_lmdb:
+        if self._scheme not in ("lmdb", "mem"):
             self._ensure_bucket(bucket)
 
         arctic = self._get_arctic(bucket)

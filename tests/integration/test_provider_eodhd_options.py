@@ -219,14 +219,14 @@ def _readback_target(storage: ArcticStorage) -> str:
     """Render the explicitly selected physical readback resolution.
 
     Reads the actual injected storage's resolution state (`_config`,
-    `_is_lmdb`, `_library_location`) instead of guessing from an ambient
+    `_scheme`, `_library_location`) instead of guessing from an ambient
     ``ClientConfig()``. The summary is allowlisted: no URI, no credentials,
     no full config dump, no exception payloads.
     """
     bucket, arctic_library = storage._library_location("options-eod-eodhd")
-    if storage._is_lmdb:
+    if storage._scheme in ("lmdb", "mem"):
         return (
-            "backend=lmdb endpoint=lmdb secure=false "
+            f"backend={storage._scheme} endpoint={storage._scheme} secure=false "
             f"bucket={bucket} arctic_library={arctic_library} "
             "library=options-eod-eodhd symbol=SHY"
         )
