@@ -15,7 +15,7 @@ execution or investment performance; no external adoption is claimed.
 - Canonical OHLCV columns (`open`, `high`, `low`, `close`, `volume`) with UTC timestamps.
 - Exchange-session and continuous calendars, gap detection, incremental fetching,
   and calendar alignment.
-- ArcticDB storage backed by MinIO/S3-compatible storage; local LMDB support for tests.
+- ArcticDB storage backed by MinIO/S3-compatible storage; local LMDB and volatile in-process `ArcticStorage.from_memory()` (`mem://`) stores.
 - Raw-provider and post-alignment validation, metadata bootstrap, and per-symbol
   cross-process file locking.
 - Integrity auditing, HTML inspection reports, defragmentation, and resource monitoring.
