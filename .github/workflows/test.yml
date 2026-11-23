@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.11"
+      - name: Install project with extras
+        run: uv sync --all-extras
+      - name: Unit suite
+        run: uv run --no-sync pytest tests/ -q
+      - name: Offline verification (scripts/verify.py all)
+        run: uv run --no-sync python scripts/verify.py all
