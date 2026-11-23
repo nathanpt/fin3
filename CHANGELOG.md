@@ -3,10 +3,13 @@
 All notable changes to fin3 are documented here. Versions follow 0.x minor
 bumps for new features; dates are UTC.
 
-## Unreleased
+## 0.5.0 — 2026-11-23
 
 ### Added
 
+- **CI workflow** (`.github/workflows/test.yml`): the unit suite and the
+  offline `scripts/verify.py all` ladder run on every push to `main` and
+  every pull request (uv-managed, all extras installed, no secrets needed).
 - **`ArcticStorage.from_memory(lock=None)`**: volatile, process-local storage
   backed by ArcticDB's native `mem://` adapter, alongside `from_lmdb()`.
   Each call starts an empty, independent in-process store (two instances
@@ -16,6 +19,16 @@ bumps for new features; dates are UTC.
   provider-free readback work. LMDB routing was unified under the storage
   scheme (`lmdb`/`mem`) with no change to LMDB behavior, signatures, or
   readback target summaries.
+- **`.env.example`**: minimal `FIN3_MINIO__*` template so the storage
+  configuration requirement is discoverable in a fresh clone.
+
+### Fixed
+
+- **Fresh clone's suite no longer fails its `verify.py` guard**: the `cli`
+  check's unreachable-storage scenario passes dummy `FIN3_MINIO__ACCESS_KEY`/
+  `SECRET_KEY`, so a checkout without `.env` reaches the operational envelope
+  (exit 1) it asserts instead of failing `MinioConfig` validation
+  (configuration exit 2).
 
 ## 0.4.1 — 2026-11-11
 
