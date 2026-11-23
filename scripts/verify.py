@@ -286,6 +286,11 @@ def _check_cli(tmp: Path) -> CheckResult:
         ["status", good, "--json"],
         env_overrides={
             "FIN3_MINIO__ENDPOINT": "127.0.0.1:1",
+            # Dummy credentials so a fresh clone without .env still reaches
+            # the operational envelope: without them MinioConfig fails
+            # validation and the scenario becomes a configuration exit 2.
+            "FIN3_MINIO__ACCESS_KEY": "verify-dummy",
+            "FIN3_MINIO__SECRET_KEY": "verify-dummy",
             "FIN3_PROVIDERS__BINANCE__PROVIDER_TYPE": "binance",
             "FIN3_LOCK__LOCK_DIR": str(tmp / "locks"),
         },
